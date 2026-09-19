@@ -11,7 +11,7 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-class MinaLongformEditorialContractTest(unittest.TestCase):
+class HostLongformEditorialContractTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.project = Path(self.directory.name) / "mina-longform"
@@ -21,7 +21,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
                 {
                     "schema": "haru.project_contract.v1",
                     "lane_contract": "social_issue_longform.v1",
-                    "production_profile": "mina_longform.v1",
+                    "production_profile": "host_longform.v1",
                 }
             )
         )
@@ -84,7 +84,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
         self.contract = {
             "schema": "haru.editorial_contract.v1",
             "project": self.project.name,
-            "production_profile": "mina_longform.v1",
+            "production_profile": "host_longform.v1",
             "storyboard_sha256": sha256(self.storyboard),
             "shots": [
                 self.shot("host-open", 0, 18, "aroll_full", "assets/mina.mp4"),
@@ -93,7 +93,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
                     **self.shot("evidence-pip", 50, 65, "broll_pip", "assets/broll-2.mp4"),
                     "presenter_asset_path": "assets/mina.mp4",
                     "presenter_asset_sha256": sha256(self.assets / "mina.mp4"),
-                    "presenter_id": "mina",
+                    "presenter_id": "host",
                 },
                 {
                     **self.shot("system-motion", 65, 95, "motion_graphics", "assets/motion.mp4"),
@@ -113,7 +113,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
 
     def shot(self, event_id, start, end, composition, path):
         asset = self.project / path
-        role = "mina_aroll" if composition == "aroll_full" else "broll"
+        role = "host_aroll" if composition == "aroll_full" else "broll"
         shot = {
             "event_id": event_id,
             "start_seconds": start,
@@ -124,7 +124,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
             "asset_role": role,
         }
         if composition == "aroll_full":
-            shot["presenter_id"] = "mina"
+            shot["presenter_id"] = "host"
         if composition in {"broll_full", "broll_pip"}:
             shot["source_receipt_path"] = f"{path}.source.json"
             shot["source_receipt_sha256"] = sha256(
@@ -307,28 +307,28 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("evidence: valid B-roll source receipt is required", result["problems"])
 
-    def test_presenter_identity_is_mina_and_broll_cannot_feature_haru(self):
-        self.contract["shots"][0]["presenter_id"] = "haru"
+    def test_presenter_identity_is_bound_and_broll_cannot_feature_other_host(self):
+        self.contract["shots"][0]["presenter_id"] = "technical_host"
         receipt = self.assets / "broll.mp4.source.json"
         value = json.loads(receipt.read_text())
-        value["brand_characters"] = ["haru"]
+        value["brand_characters"] = ["technical_host"]
         receipt.write_text(json.dumps(value))
         self.write_contract()
 
         result = editorial_contract.validate_project(self.project, require_preview=False)
 
         self.assertFalse(result["ok"])
-        self.assertIn("host-open: presenter_id must be mina", result["problems"])
+        self.assertIn("host-open: presenter_id must be host", result["problems"])
         self.assertIn("evidence: valid B-roll source receipt is required", result["problems"])
 
     def switch_to_haru_tech(self):
-        """Move the whole fixture onto the haru_tech.v1 profile."""
-        self.contract["production_profile"] = "haru_tech.v1"
+        """Move the whole fixture onto the technical_host.v1 profile."""
+        self.contract["production_profile"] = "technical_host.v1"
         for shot in self.contract["shots"]:
-            if shot.get("asset_role") == "mina_aroll":
-                shot["asset_role"] = "haru_aroll"
-            if shot.get("presenter_id") == "mina":
-                shot["presenter_id"] = "haru"
+            if shot.get("asset_role") == "host_aroll":
+                shot["asset_role"] = "technical_host_aroll"
+            if shot.get("presenter_id") == "host":
+                shot["presenter_id"] = "technical_host"
 
     def test_haru_tech_profile_passes_with_its_own_presenter(self):
         self.switch_to_haru_tech()
@@ -338,22 +338,22 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
         result = editorial_contract.validate_project(self.project, require_preview=True)
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["profile"], "haru_tech.v1")
+        self.assertEqual(result["profile"], "technical_host.v1")
         # Same editorial arithmetic as Mina — only the presenter changed.
         self.assertEqual(result["ratios"], {"aroll": 0.18, "broll": 0.52, "motion_graphics": 0.3})
 
-    def test_haru_tech_profile_rejects_the_mina_presenter(self):
+    def test_technical_profile_rejects_the_general_host(self):
         """The presenter check must bind to the declared profile, not to a default."""
         self.switch_to_haru_tech()
-        self.contract["shots"][0]["asset_role"] = "mina_aroll"
-        self.contract["shots"][0]["presenter_id"] = "mina"
+        self.contract["shots"][0]["asset_role"] = "host_aroll"
+        self.contract["shots"][0]["presenter_id"] = "host"
         self.write_contract()
 
         result = editorial_contract.validate_project(self.project, require_preview=False)
 
         self.assertFalse(result["ok"])
-        self.assertIn("host-open: asset_role must be haru_aroll", result["problems"])
-        self.assertIn("host-open: presenter_id must be haru", result["problems"])
+        self.assertIn("host-open: asset_role must be technical_host_aroll", result["problems"])
+        self.assertIn("host-open: presenter_id must be technical_host", result["problems"])
 
     def rebind_receipt(self, name, **changes):
         """Edit a source receipt AND re-bind its digest.
@@ -371,7 +371,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
 
     def test_haru_tech_broll_may_feature_its_own_presenter(self):
         self.switch_to_haru_tech()
-        self.rebind_receipt("broll.mp4", brand_characters=["haru"])
+        self.rebind_receipt("broll.mp4", brand_characters=["technical_host"])
         contract_path = self.write_contract()
         self.write_preview_review(contract_path)
 
@@ -387,7 +387,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
         receipt first and this asserts nothing about the presenter at all.
         """
         self.switch_to_haru_tech()
-        self.rebind_receipt("broll.mp4", brand_characters=["mina"])
+        self.rebind_receipt("broll.mp4", brand_characters=["host"])
         self.write_contract()
 
         result = editorial_contract.validate_project(self.project, require_preview=False)
@@ -405,7 +405,7 @@ class MinaLongformEditorialContractTest(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn(
-            "production_profile must be one of ['haru_tech.v1', 'mina_longform.v1']",
+            "production_profile must be one of ['host_longform.v1', 'technical_host.v1']",
             result["problems"],
         )
         # An unusable profile must not swallow the rest of the report.

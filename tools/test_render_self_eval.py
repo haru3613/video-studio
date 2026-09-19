@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import render_self_eval as engine
+import render_contract
 import self_eval_fixture
 
 
@@ -26,6 +27,7 @@ def render_marker(project: Path, *, duration=3.0) -> dict:
     return {
         "schema": "haru.render_result.v1",
         "status": "render_complete",
+        "render_input_revision": render_contract.render_input_revision(project),
         "project": project.name,
         "output": "output/final.mp4",
         "video_sha256": digest,
@@ -149,9 +151,7 @@ class EngineCase(unittest.TestCase):
             os.environ,
             {
                 engine.authority.STATE_ROOT_ENV: str(self.root / "state"),
-                engine.authority.ATTESTATION_ROOT_ENV: str(
-                    self.root / "attestations"
-                ),
+                engine.authority.ATTESTATION_ROOT_ENV: str(self.root / "attestations"),
             },
         )
         self.environment.start()
@@ -162,24 +162,24 @@ class EngineCase(unittest.TestCase):
 
     def test_identity_bytes_are_exact_fixed_order_and_absent_lane_authorities(self):
         value = json.loads(engine.identity_bytes(self.project))
-        self.assertEqual(
-            list(value), ["boundary_policy_sha256", "inputs", "schema"]
-        )
+        self.assertEqual(list(value), ["boundary_policy_sha256", "inputs", "schema"])
         self.assertEqual(value["schema"], engine.IDENTITY_SCHEMA)
         self.assertEqual(
             [entry["path"] for entry in value["inputs"]], list(engine.INPUT_ORDER)
         )
-        self.assertEqual(value["inputs"][5], {"path": engine.EDITORIAL, "state": "absent"})
-        self.assertEqual(value["inputs"][6], {"path": engine.ASSEMBLY, "state": "absent"})
+        self.assertEqual(
+            value["inputs"][5], {"path": engine.EDITORIAL, "state": "absent"}
+        )
+        self.assertEqual(
+            value["inputs"][6], {"path": engine.ASSEMBLY, "state": "absent"}
+        )
         self.assertEqual(
             engine.authority.canonical_digest(value),
             hashlib.sha256(engine.identity_bytes(self.project)).hexdigest(),
         )
 
     def test_evidence_budget_counts_exact_bytes_and_never_overcommits(self):
-        with mock.patch.dict(
-            engine.POLICY, {"max_total_evidence_bytes": 10}
-        ):
+        with mock.patch.dict(engine.POLICY, {"max_total_evidence_bytes": 10}):
             budget = engine.Budget()
             self.assertTrue(budget.admit(6))
             self.assertTrue(budget.admit(4))
@@ -219,7 +219,9 @@ class EngineCase(unittest.TestCase):
             (self.project / f"{engine.attempt_dir(2)}/outcome.json").is_file()
         )
 
-    def test_tail_sampling_policy_change_invalidates_old_pass_and_allocates_new_attempt(self):
+    def test_tail_sampling_policy_change_invalidates_old_pass_and_allocates_new_attempt(
+        self,
+    ):
         legacy_policy = copy.deepcopy(engine.POLICY)
         legacy_policy["algorithm"] = "haru.render_self_eval_policy.v1"
         legacy_policy["sampling"]["mode"] = "half_open_bin_center"
@@ -228,9 +230,11 @@ class EngineCase(unittest.TestCase):
         legacy_policy.pop("video_tail_coverage")
         legacy_bytes = engine.authority.canonical_bytes(legacy_policy)
         legacy_sha = engine.authority.canonical_digest(legacy_policy)
-        with mock.patch.object(engine, "POLICY_BYTES", legacy_bytes), mock.patch.object(
-            engine, "POLICY_SHA256", legacy_sha
-        ), mock.patch.object(engine, "ALGORITHM", "haru.render_self_eval.v1"):
+        with (
+            mock.patch.object(engine, "POLICY_BYTES", legacy_bytes),
+            mock.patch.object(engine, "POLICY_SHA256", legacy_sha),
+            mock.patch.object(engine, "ALGORITHM", "haru.render_self_eval.v1"),
+        ):
             old = self_eval_fixture.seal(self.project, status="pass", attempt=1)
             self.assertEqual(old["attempt"], 1)
             self.assertIsNotNone(engine.current_pass_ref(self.project))
@@ -251,13 +255,9 @@ class EngineCase(unittest.TestCase):
             attempt=3,
         )
         self.assertEqual(result["attempt"], 3)
-        self.assertEqual(
-            result["status"], "human_intervention_required"
-        )
+        self.assertEqual(result["status"], "human_intervention_required")
         for ordinal in (1, 2, 3):
-            outcome = (
-                self.project / f"{engine.attempt_dir(ordinal)}/outcome.json"
-            )
+            outcome = self.project / f"{engine.attempt_dir(ordinal)}/outcome.json"
             self.assertEqual(
                 json.loads(outcome.read_text(encoding="utf-8"))["verdict"],
                 "fail",
@@ -349,7 +349,9 @@ class EngineCase(unittest.TestCase):
         )
         raw = self.root / "jump.raw"
         samples = [0] * 48000 + [32767] * 48000
-        raw.write_bytes(b"".join(int(value).to_bytes(2, "little", signed=True) for value in samples))
+        raw.write_bytes(
+            b"".join(int(value).to_bytes(2, "little", signed=True) for value in samples)
+        )
         jump = engine.audio_jump(raw, window)
         self.assertGreaterEqual(jump["value"], 0.5)
 

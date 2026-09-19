@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import canonical_layout  # noqa: E402
 import render_contract  # noqa: E402
+from workspace_barrier import mutation_barrier  # noqa: E402
 
 STATUS_SCHEMA = "video_studio.local_delivery_status.v1"
 BUNDLE_SCHEMA = "video_studio.delivery_bundle.v1"
@@ -503,7 +504,7 @@ def _direct_child_directory(parent: Path, name: str) -> Path:
     return child
 
 
-def export_delivery(
+def _export_delivery_unlocked(
     project_root: Path,
     *,
     destination: Path | None,
@@ -670,6 +671,183 @@ def export_delivery(
     }
 
 
+def export_delivery(
+    project_root: Path,
+    *,
+    destination: Path | None,
+    idempotency_key: str,
+) -> dict:
+    with mutation_barrier(project_root):
+        return _export_delivery_unlocked(
+            project_root,
+            destination=destination,
+            idempotency_key=idempotency_key,
+        )
+
+
+def _export_diagnostics_unlocked(
+    project_root: Path, *, destination: Path | None, idempotency_key: str
+) -> dict:
+    """Export bounded evidence of a blocked state, never a delivery-ready claim."""
+    import math
+    from job_interface import redact
+
+    if KEY.fullmatch(idempotency_key) is None:
+        raise DeliveryError("invalid_input", "invalid idempotency key")
+    project = _direct_project(project_root)
+    status = technical_status(project)
+
+    def clean(value):
+        if isinstance(value, dict):
+            return {
+                key: clean(item)
+                for key, item in value.items()
+                if key not in {"checked_at", "project_root"}
+            }
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, str):
+            return redact(value.replace(str(project), "<project>"))
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    report = {
+        "schema": "video_studio.diagnostic_report.v1",
+        "kind": "diagnostic_only",
+        "project": project.name,
+        "technical_status": clean(status),
+        "delivery_ready": False,
+        "publication_ready": False,
+        "human_approval": False,
+    }
+    serialized = json.dumps(
+        report, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    bundle_id = hashlib.sha256(serialized).hexdigest()
+    root = _destination_root(destination)
+    collection = _direct_child_directory(root, "diagnostics")
+    project_destination = _direct_child_directory(collection, project.name)
+    bundle = project_destination / bundle_id
+    state = _direct_child_directory(
+        _direct_child_directory(
+            _direct_child_directory(project, ".hvp"), "local-delivery"
+        ),
+        "exports",
+    )
+    receipt_path = state / f"{idempotency_key}.json"
+    expected_receipt = {
+        "schema": "video_studio.diagnostic_idempotency.v1",
+        "bundle_id": bundle_id,
+        "destination_root": str(root),
+    }
+    if receipt_path.exists() or receipt_path.is_symlink():
+        try:
+            if (
+                receipt_path.is_symlink()
+                or json.loads(receipt_path.read_text()) != expected_receipt
+            ):
+                raise ValueError("different request")
+        except (OSError, ValueError, UnicodeError) as error:
+            raise DeliveryError(
+                "idempotency_conflict", "key is bound to another export"
+            ) from error
+
+    def existing_matches():
+        if bundle.is_symlink() or not bundle.is_dir():
+            return False
+        evidence = bundle / "diagnostic.json"
+        manifest = bundle / "artifact-manifest.json"
+        try:
+            return (
+                not evidence.is_symlink()
+                and not manifest.is_symlink()
+                and json.loads(evidence.read_text()) == report
+                and json.loads(manifest.read_text())
+                == {
+                    "schema": "video_studio.diagnostic_bundle.v1",
+                    "bundle_id": bundle_id,
+                    "kind": "diagnostic_only",
+                    "delivery_ready": False,
+                    "publication_ready": False,
+                    "human_approval": False,
+                    "artifacts": [
+                        {
+                            "path": "diagnostic.json",
+                            "sha256": _sha256(evidence),
+                            "bytes": evidence.stat().st_size,
+                        }
+                    ],
+                }
+            )
+        except (OSError, ValueError, UnicodeError):
+            return False
+
+    reused = bundle.exists()
+    if reused or bundle.is_symlink():
+        if not existing_matches():
+            raise DeliveryError("delivery_target_conflict", "diagnostic bundle differs")
+    else:
+        staging = project_destination / f".{bundle_id}.staging-{uuid.uuid4()}"
+        staging.mkdir(mode=0o700)
+        try:
+            evidence = staging / "diagnostic.json"
+            _write_json_new(evidence, report)
+            _write_json_new(
+                staging / "artifact-manifest.json",
+                {
+                    "schema": "video_studio.diagnostic_bundle.v1",
+                    "bundle_id": bundle_id,
+                    "kind": "diagnostic_only",
+                    "delivery_ready": False,
+                    "publication_ready": False,
+                    "human_approval": False,
+                    "artifacts": [
+                        {
+                            "path": "diagnostic.json",
+                            "sha256": _sha256(evidence),
+                            "bytes": evidence.stat().st_size,
+                        }
+                    ],
+                },
+            )
+            try:
+                os.rename(staging, bundle)
+            except OSError:
+                if not existing_matches():
+                    raise
+                reused = True
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    if not receipt_path.exists():
+        _write_json_new(receipt_path, expected_receipt)
+    return {
+        "schema": "video_studio.diagnostic_export.v1",
+        "project": project.name,
+        "status": "diagnostic_only",
+        "bundle_id": bundle_id,
+        "bundle_path": str(bundle),
+        "reused": reused,
+        "delivery_ready": False,
+        "publication_ready": False,
+        "human_approval": False,
+    }
+
+
+def export_diagnostics(
+    project_root: Path,
+    *,
+    destination: Path | None,
+    idempotency_key: str,
+) -> dict:
+    with mutation_barrier(project_root):
+        return _export_diagnostics_unlocked(
+            project_root,
+            destination=destination,
+            idempotency_key=idempotency_key,
+        )
+
+
 def _response(outcome: str, code: str, project: str | None, data=None) -> dict:
     return {
         "schema_version": 1,
@@ -689,6 +867,7 @@ def main(argv=None) -> int:
     export_parser.add_argument("project", type=Path)
     export_parser.add_argument("--destination", type=Path)
     export_parser.add_argument("--idempotency-key", required=True)
+    export_parser.add_argument("--diagnostic", action="store_true")
     args = parser.parse_args(argv)
     project = str(args.project)
     try:
@@ -697,13 +876,14 @@ def main(argv=None) -> int:
             outcome = "ok" if not data["blockers"] else "blocked"
             code = "delivery_technical_ready" if outcome == "ok" else "delivery_blocked"
         else:
-            data = export_delivery(
+            exporter = export_diagnostics if args.diagnostic else export_delivery
+            data = exporter(
                 args.project,
                 destination=args.destination,
                 idempotency_key=args.idempotency_key,
             )
             outcome = "ok"
-            code = "delivery_exported"
+            code = "diagnostics_exported" if args.diagnostic else "delivery_exported"
         print(json.dumps(_response(outcome, code, project, data), sort_keys=True))
         return 0 if outcome == "ok" else 3
     except DeliveryError as exc:

@@ -23,8 +23,162 @@ from tools.http_mcp import (
     HttpMcpConfig,
     JwksTokenVerifier,
     build_app,
+    load_config,
 )
 import tools.http_mcp as http_mcp
+from tools.workspace import initialize as initialize_workspace
+
+
+def backend_schema(name: str) -> dict[str, Any]:
+    fields: dict[str, dict[str, Any]] = {
+        "schema_version": {"type": "integer"},
+        "workspace_root": {"type": "string"},
+        "projects_root": {"type": "string"},
+        "project_root": {"type": "string"},
+        "project": {"type": "string"},
+        "idempotency_key": {"type": "string"},
+        "owner": {"type": "string"},
+        "lease_id": {"type": "string"},
+        "ttl_seconds": {"type": "integer"},
+        "job_id": {"type": "string"},
+        "max_bytes": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        "diagnostic": {"type": "boolean", "default": False},
+        "runner": {"type": "string"},
+        "tools_root": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "comment_id": {"type": "string"},
+        "status": {"type": "string"},
+        "expected_package_id": {"type": "string"},
+        "expected_asset_sha256": {"type": "string"},
+        "client_id": {"type": "string"},
+        "package_id": {"type": "string"},
+        "asset_id": {"type": "string"},
+        "asset_sha256": {"type": "string"},
+        "timestamp_seconds": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+        "body": {"type": "string"},
+        "role": {"type": "string"},
+        "inbox_path": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "inline_text": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "stage_id": {"type": "string"},
+        "artifact": {"type": "string"},
+        "produced_by": {"type": "string"},
+        "cron_run_id": {"type": "string"},
+        "candidate_id": {"type": "string"},
+        "chosen_by": {"type": "string"},
+        "chosen_at": {"type": "integer"},
+        "action": {"type": "string"},
+        "reviewed_by": {"type": "string"},
+        "verdict": {"type": "string"},
+        "notes": {"type": "string"},
+    }
+    tool_fields: dict[str, list[str]] = {
+        "workspace_info": ["workspace_root"],
+        "project_list": ["workspace_root"],
+        "create": ["projects_root", "project", "idempotency_key"],
+        "select": ["projects_root", "project"],
+        "status": ["project_root"],
+        "artifact_index": ["project_root"],
+        "record_selection": [
+            "project_root",
+            "cron_run_id",
+            "candidate_id",
+            "chosen_by",
+            "chosen_at",
+            "idempotency_key",
+        ],
+        "lease_claim": ["project_root", "owner", "ttl_seconds", "idempotency_key"],
+        "lease_renew": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "ttl_seconds",
+            "idempotency_key",
+        ],
+        "lease_status": ["project_root"],
+        "lease_release": ["project_root", "owner", "lease_id", "idempotency_key"],
+        "run_next": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "runner",
+            "tools_root",
+            "idempotency_key",
+        ],
+        "verify": ["project_root"],
+        "delivery_status": ["project_root"],
+        "export_delivery": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "idempotency_key",
+            "diagnostic",
+        ],
+        "job_status": ["project_root", "job_id"],
+        "job_logs": ["project_root", "job_id", "max_bytes"],
+        "job_cancel": ["project_root", "owner", "lease_id", "job_id", "idempotency_key"],
+        "job_resume": ["project_root", "owner", "lease_id", "job_id", "idempotency_key"],
+        "review_feedback": ["project_root"],
+        "review_add": [
+            "project_root",
+            "client_id",
+            "package_id",
+            "asset_id",
+            "asset_sha256",
+            "timestamp_seconds",
+            "body",
+            "idempotency_key",
+        ],
+        "review_resolve": [
+            "project_root",
+            "comment_id",
+            "status",
+            "expected_package_id",
+            "expected_asset_sha256",
+            "idempotency_key",
+        ],
+        "artifact_stage": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "role",
+            "inbox_path",
+            "inline_text",
+            "idempotency_key",
+        ],
+        "artifact_import": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "stage_id",
+            "idempotency_key",
+        ],
+        "produce_staged_artifact": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "stage_id",
+            "artifact",
+            "produced_by",
+            "idempotency_key",
+        ],
+        "visual_qa": ["project_root", "owner", "lease_id", "action", "idempotency_key"],
+        "pronunciation_review": [
+            "project_root",
+            "owner",
+            "lease_id",
+            "reviewed_by",
+            "verdict",
+            "notes",
+            "idempotency_key",
+        ],
+    }
+    selected = ["schema_version", *tool_fields[name]]
+    optional = {"tools_root", "max_bytes", "diagnostic", "inbox_path", "inline_text"}
+    return {
+        "type": "object",
+        "properties": {field: fields[field] for field in selected},
+        "required": [field for field in selected if field not in optional],
+        "additionalProperties": False,
+    }
 
 
 class FakeBackend:
@@ -34,7 +188,7 @@ class FakeBackend:
             types.Tool(
                 name=name,
                 description=f"Backend {name}",
-                inputSchema={"type": "object", "additionalProperties": True},
+                inputSchema=backend_schema(name),
             )
             for name in TOOL_SCOPES
         ]
@@ -48,7 +202,12 @@ class FakeBackend:
         copied = dict(arguments or {})
         self.calls.append((name, copied))
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text="backend-result")],
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"tool": name, "arguments": copied}),
+                )
+            ],
             structuredContent={"tool": name, "arguments": copied},
             _meta={"backend": "fake"},
         )
@@ -70,8 +229,8 @@ def signing_material() -> tuple[Any, dict[str, Any]]:
 @pytest.fixture
 def gateway_config(tmp_path: Path) -> HttpMcpConfig:
     workspace = tmp_path / "workspace"
+    initialize_workspace(workspace)
     projects = workspace / "projects"
-    projects.mkdir(parents=True)
     media_tools = tmp_path / "repo" / "media-tools"
     media_tools.mkdir(parents=True)
     return HttpMcpConfig(
@@ -117,6 +276,50 @@ def issue_token(
         algorithm="RS256",
         headers={"kid": kid},
     )
+
+
+def test_config_requires_initialized_fixed_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    initialize_workspace(workspace)
+    fake_home = tmp_path / "home"
+    backend = fake_home / ".local/share/video-studio/bin/video-studio-mcp"
+    backend.parent.mkdir(parents=True)
+    backend.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    backend.chmod(0o700)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    config_file = tmp_path / "http.toml"
+    config_file.write_text(
+        "\n".join(
+            [
+                "[server]",
+                'host = "127.0.0.1"',
+                "port = 8765",
+                'resource_url = "https://studio.example/mcp"',
+                'allowed_origins = ["https://studio.example"]',
+                "[oauth]",
+                'issuer = "https://issuer.example"',
+                'audience = "https://studio.example/mcp"',
+                'jwks_url = "https://issuer.example/jwks"',
+                'algorithms = ["RS256"]',
+                "[paths]",
+                f'workspace_root = "{workspace}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    loaded = load_config(config_file, repo_root=Path(__file__).resolve().parents[1])
+    assert loaded.workspace_root == workspace.resolve()
+    assert loaded.projects_root == (workspace / "projects").resolve()
+    assert loaded.backend_command == backend.resolve()
+
+    (workspace / "inbox").rmdir()
+    with pytest.raises(http_mcp.ConfigurationError, match="inbox"):
+        load_config(config_file, repo_root=Path(__file__).resolve().parents[1])
 
 
 def verifier_for(
@@ -202,25 +405,251 @@ async def test_real_streamable_http_session_preserves_schema_and_structured_resu
             }
         )
         status = next(tool for tool in listed.tools if tool.name == "status")
-        assert status.inputSchema == {"type": "object", "additionalProperties": True}
+        assert status.inputSchema["additionalProperties"] is False
+        assert "project_id" in status.inputSchema["properties"]
+        assert "project_root" not in status.inputSchema["properties"]
         assert READ_SCOPE in (status.description or "")
 
         result = await session.call_tool(
-            "status", {"schema_version": 1, "project_root": str(project)}
+            "status", {"schema_version": 1, "project_id": "demo"}
         )
         assert result.isError is False
         assert result.structuredContent == {
             "tool": "status",
-            "arguments": {"schema_version": 1, "project_root": str(project.resolve())},
+            "arguments": {"schema_version": 1, "project_root": "demo"},
         }
         assert result.meta == {"backend": "fake"}
         assert isinstance(result.content[0], types.TextContent)
-        assert result.content[0].text == "backend-result"
+        assert str(gateway_config.workspace_root) not in result.content[0].text
+        assert json.loads(result.content[0].text)["arguments"]["project_root"] == "demo"
 
         hidden = await session.call_tool("publish", {})
         assert hidden.isError is True
         assert "not exposed" in hidden.content[0].text
         assert [name for name, _ in backend.calls] == ["status"]
+
+
+@pytest.mark.asyncio
+async def test_public_tool_schemas_never_expose_server_filesystem_fields(
+    gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
+) -> None:
+    backend = FakeBackend()
+    app = make_app(gateway_config, signing_material, backend)
+    token = issue_token(signing_material)
+
+    async with mcp_session(app, token) as session:
+        tools = (await session.list_tools()).tools
+
+    forbidden = {"workspace_root", "projects_root", "project_root", "tools_root", "source_file"}
+    assert {"workspace_info", "project_list", "artifact_stage", "artifact_import"}.issubset(
+        {tool.name for tool in tools}
+    )
+    for tool in tools:
+        properties = tool.inputSchema.get("properties", {})
+        assert forbidden.isdisjoint(properties), tool.name
+        if tool.name not in {"workspace_info", "project_list"}:
+            assert properties["project_id"]["pattern"] == http_mcp._SLUG.pattern
+    export_schema = next(tool.inputSchema for tool in tools if tool.name == "export_delivery")
+    assert export_schema["properties"]["diagnostic"] == {
+        "type": "boolean",
+        "default": False,
+    }
+    review_schema = next(tool.inputSchema for tool in tools if tool.name == "review_resolve")
+    assert "expected_package_id" in review_schema["properties"]
+    add_schema = next(tool.inputSchema for tool in tools if tool.name == "review_add")
+    assert {"owner", "lease_id", "reviewed_by", "verdict", "approval"}.isdisjoint(
+        add_schema["properties"]
+    )
+    assert "produce_artifact" not in {tool.name for tool in tools}
+
+
+@pytest.mark.asyncio
+async def test_workspace_catalog_calls_use_fixed_root_and_redact_backend_paths(
+    gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
+) -> None:
+    backend = FakeBackend()
+    app = make_app(gateway_config, signing_material, backend)
+    token = issue_token(signing_material, scopes=(READ_SCOPE,))
+
+    async with mcp_session(app, token) as session:
+        info = await session.call_tool("workspace_info", {"schema_version": 1})
+        projects = await session.call_tool("project_list", {"schema_version": 1})
+
+    assert info.isError is False
+    assert projects.isError is False
+    assert [name for name, _ in backend.calls] == ["workspace_info", "project_list"]
+    assert all(
+        arguments["workspace_root"] == str(gateway_config.workspace_root)
+        for _, arguments in backend.calls
+    )
+    assert info.structuredContent["arguments"]["workspace_root"] == "workspace"
+    assert str(gateway_config.workspace_root) not in info.content[0].text
+    assert str(gateway_config.workspace_root) not in projects.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_project_creation_uses_public_slug_and_fixed_projects_root(
+    gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
+) -> None:
+    backend = FakeBackend()
+    app = make_app(gateway_config, signing_material, backend)
+    token = issue_token(signing_material, scopes=(EXECUTE_SCOPE,))
+
+    async with mcp_session(app, token) as session:
+        invalid = await session.call_tool(
+            "create",
+            {"schema_version": 1, "project_id": "../escape", "idempotency_key": "create-1"},
+        )
+        created = await session.call_tool(
+            "create",
+            {"schema_version": 1, "project_id": "new-project", "idempotency_key": "create-2"},
+        )
+
+    assert invalid.isError is True
+    assert created.isError is False
+    assert backend.calls == [
+        (
+            "create",
+            {
+                "schema_version": 1,
+                "idempotency_key": "create-2",
+                "projects_root": str(gateway_config.projects_root),
+                "project": "new-project",
+            },
+        )
+    ]
+    assert str(gateway_config.projects_root) not in created.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_public_intake_translates_project_id_and_accepts_only_bounded_sources(
+    gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
+) -> None:
+    project = gateway_config.projects_root / "demo"
+    project.mkdir()
+    backend = FakeBackend()
+    app = make_app(gateway_config, signing_material, backend)
+    token = issue_token(signing_material, scopes=(EXECUTE_SCOPE,))
+    base = {
+        "schema_version": 1,
+        "project_id": "demo",
+        "owner": "caller-owner",
+        "lease_id": "lease",
+        "role": "script_notes",
+        "idempotency_key": "stage-1",
+    }
+
+    async with mcp_session(app, token) as session:
+        inline = await session.call_tool(
+            "artifact_stage", {**base, "inline_text": "A bounded production note"}
+        )
+        inbox = await session.call_tool(
+            "artifact_stage",
+            {
+                **base,
+                "role": "reference_image",
+                "inbox_path": "references/cover.png",
+                "idempotency_key": "stage-2",
+            },
+        )
+        both = await session.call_tool(
+            "artifact_stage",
+            {**base, "inline_text": "note", "inbox_path": "note.txt"},
+        )
+        absolute = await session.call_tool(
+            "artifact_stage",
+            {**base, "inbox_path": "/etc/passwd"},
+        )
+        traversal = await session.call_tool(
+            "artifact_stage",
+            {**base, "inbox_path": "../outside.png"},
+        )
+
+    assert inline.isError is False
+    assert inbox.isError is False
+    assert both.isError is True
+    assert absolute.isError is True
+    assert traversal.isError is True
+    assert [name for name, _ in backend.calls] == ["artifact_stage", "artifact_stage"]
+    for _, arguments in backend.calls:
+        assert arguments["project_root"] == str(project.resolve())
+        assert arguments["owner"].startswith("http:")
+        assert "project_id" not in arguments
+    with pytest.raises(http_mcp.GatewayPolicyError, match="1 MiB"):
+        http_mcp.enforce_arguments(
+            "artifact_stage",
+            {
+                "schema_version": 1,
+                "project_root": str(project),
+                "role": "script_notes",
+                "inline_text": "界" * 350_000,
+            },
+            gateway_config,
+            None,  # no owner field is present, so no token data is consulted
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage_ids_are_opaque_and_old_absolute_producer_is_hidden(
+    gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
+) -> None:
+    project = gateway_config.projects_root / "demo"
+    project.mkdir()
+    backend = FakeBackend()
+    app = make_app(gateway_config, signing_material, backend)
+    token = issue_token(signing_material, scopes=(EXECUTE_SCOPE,))
+    common = {
+        "schema_version": 1,
+        "project_id": "demo",
+        "owner": "ignored",
+        "lease_id": "lease",
+        "idempotency_key": "intake-1",
+    }
+
+    async with mcp_session(app, token) as session:
+        bad = await session.call_tool(
+            "artifact_import", {**common, "stage_id": "../staging/blob"}
+        )
+        imported = await session.call_tool(
+            "artifact_import", {**common, "stage_id": "a" * 32}
+        )
+        produced = await session.call_tool(
+            "produce_staged_artifact",
+            {
+                **common,
+                "stage_id": "a" * 32,
+                "artifact": "script-proposal.md",
+                "produced_by": "agent",
+            },
+        )
+        forbidden = await session.call_tool(
+            "produce_staged_artifact",
+            {
+                **common,
+                "stage_id": "a" * 32,
+                "artifact": "output/final.mp4",
+                "produced_by": "agent",
+            },
+        )
+        hidden = await session.call_tool(
+            "produce_artifact",
+            {
+                **common,
+                "source_file": "/server/project/.hvp/staging/blob",
+                "artifact": "script-proposal.md",
+                "produced_by": "agent",
+            },
+        )
+
+    assert bad.isError is True
+    assert imported.isError is False
+    assert produced.isError is False
+    assert forbidden.isError is True
+    assert hidden.isError is True
+    assert [name for name, _ in backend.calls] == [
+        "artifact_import",
+        "produce_staged_artifact",
+    ]
 
 
 @pytest.mark.asyncio
@@ -271,7 +700,7 @@ async def test_per_tool_scope_blocks_call_before_backend(
 
     async with mcp_session(app, token) as session:
         result = await session.call_tool(
-            "status", {"schema_version": 1, "project_root": str(project)}
+            "status", {"schema_version": 1, "project_id": "demo"}
         )
     assert result.isError is True
     assert "required: studio:read" in result.content[0].text
@@ -300,10 +729,10 @@ async def test_workspace_traversal_never_reaches_backend(
     async with mcp_session(app, token) as session:
         result = await session.call_tool(
             "status",
-            {"schema_version": 1, "project_root": str(gateway_config.projects_root / "..")},
+            {"schema_version": 1, "project_id": "../outside"},
         )
     assert result.isError is True
-    assert "cannot contain '..'" in result.content[0].text
+    assert "Input validation error" in result.content[0].text
     assert backend.calls == []
 
 
@@ -321,10 +750,10 @@ async def test_project_symlink_escape_never_reaches_backend(
 
     async with mcp_session(app, token) as session:
         result = await session.call_tool(
-            "status", {"schema_version": 1, "project_root": str(linked)}
+            "status", {"schema_version": 1, "project_id": "linked"}
         )
     assert result.isError is True
-    assert "symlink" in result.content[0].text
+    assert "direct workspace project" in result.content[0].text
     assert backend.calls == []
 
 
@@ -343,7 +772,7 @@ async def test_lease_owner_is_derived_from_authenticated_principal(
             "lease_claim",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "owner": "pretend-to-be-someone-else",
                 "ttl_seconds": 60,
                 "idempotency_key": "claim-1",
@@ -372,7 +801,7 @@ async def test_caller_cannot_select_tools_root(
             "run_next",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "owner": "ignored",
                 "lease_id": "lease",
                 "runner": "render-project",
@@ -381,7 +810,7 @@ async def test_caller_cannot_select_tools_root(
             },
         )
     assert result.isError is True
-    assert "caller-controlled tools" in result.content[0].text
+    assert "Input validation error" in result.content[0].text
     assert backend.calls == []
 
 
@@ -400,7 +829,7 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
             "export_delivery",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "owner": "ignored",
                 "lease_id": "lease",
                 "idempotency_key": "export-1",
@@ -411,7 +840,7 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
             "job_status",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "job_id": "../another-project",
             },
         )
@@ -419,7 +848,7 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
             "job_logs",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "job_id": "a" * 32,
                 "max_bytes": 65_537,
             },
@@ -428,7 +857,7 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
             "export_delivery",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "owner": "ignored",
                 "lease_id": "lease",
                 "idempotency_key": "export-2",
@@ -438,14 +867,14 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
             "job_logs",
             {
                 "schema_version": 1,
-                "project_root": str(project),
+                "project_id": "demo",
                 "job_id": "b" * 32,
                 "max_bytes": 65_536,
             },
         )
 
     assert destination.isError is True
-    assert "server-configured" in destination.content[0].text
+    assert "Input validation error" in destination.content[0].text
     assert bad_job.isError is True
     assert "32 lowercase hexadecimal" in bad_job.content[0].text
     assert oversized_log.isError is True
@@ -458,7 +887,7 @@ async def test_delivery_and_job_arguments_stay_inside_server_policy(
 
 
 @pytest.mark.asyncio
-async def test_review_resolution_is_digest_bound_and_principal_owned(
+async def test_review_mutations_need_review_scope_and_no_execute_lease(
     gateway_config: HttpMcpConfig, signing_material: tuple[Any, dict[str, Any]]
 ) -> None:
     project = gateway_config.projects_root / "demo"
@@ -468,9 +897,7 @@ async def test_review_resolution_is_digest_bound_and_principal_owned(
     token = issue_token(signing_material, scopes=(REVIEW_SCOPE,))
     valid = {
         "schema_version": 1,
-        "project_root": str(project),
-        "owner": "caller-selected-owner",
-        "lease_id": "lease",
+        "project_id": "demo",
         "comment_id": "12345678-1234-1234-1234-123456789abc",
         "status": "resolved",
         "expected_package_id": "a" * 64,
@@ -488,15 +915,75 @@ async def test_review_resolution_is_digest_bound_and_principal_owned(
         bad_status = await session.call_tool(
             "review_resolve", {**valid, "status": "approved"}
         )
+        bad_body = await session.call_tool(
+            "review_add",
+            {
+                "schema_version": 1,
+                "project_id": "demo",
+                "client_id": "12345678-1234-1234-1234-123456789abc",
+                "package_id": "a" * 64,
+                "asset_id": "video-current",
+                "asset_sha256": "b" * 64,
+                "timestamp_seconds": 0,
+                "body": "x" * 5001,
+                "idempotency_key": "add-1",
+            },
+        )
+        bad_key = await session.call_tool(
+            "review_add",
+            {
+                "schema_version": 1,
+                "project_id": "demo",
+                "client_id": "12345678-1234-1234-1234-123456789abc",
+                "package_id": "a" * 64,
+                "asset_id": "video-current",
+                "asset_sha256": "b" * 64,
+                "timestamp_seconds": 0,
+                "body": "Please tighten this cut.",
+                "idempotency_key": "not allowed",
+            },
+        )
+        added = await session.call_tool(
+            "review_add",
+            {
+                "schema_version": 1,
+                "project_id": "demo",
+                "client_id": "12345678-1234-1234-1234-123456789abc",
+                "package_id": "a" * 64,
+                "asset_id": "video-current",
+                "asset_sha256": "b" * 64,
+                "timestamp_seconds": 0,
+                "body": "Please tighten this cut.",
+                "idempotency_key": "add-2",
+            },
+        )
         accepted = await session.call_tool("review_resolve", valid)
+        render = await session.call_tool(
+            "run_next",
+            {
+                "schema_version": 1,
+                "project_id": "demo",
+                "owner": "ignored",
+                "lease_id": "lease",
+                "runner": "render-project",
+                "idempotency_key": "render-1",
+            },
+        )
 
     assert bad_uuid.isError is True
     assert bad_digest.isError is True
     assert bad_status.isError is True
+    assert bad_body.isError is True
+    assert bad_key.isError is True
+    assert added.isError is False
     assert accepted.isError is False
-    assert [name for name, _ in backend.calls] == ["review_resolve"]
-    assert backend.calls[0][1]["owner"].startswith("http:")
-    assert backend.calls[0][1]["owner"] != "caller-selected-owner"
+    assert render.isError is True
+    assert [name for name, _ in backend.calls] == ["review_add", "review_resolve"]
+    assert "owner" not in backend.calls[0][1]
+    assert "lease_id" not in backend.calls[0][1]
+    assert backend.calls[0][1]["idempotency_key"].startswith("http_")
+    assert backend.calls[0][1]["idempotency_key"] != "add-2"
+    assert "owner" not in backend.calls[1][1]
 
 
 @pytest.mark.asyncio

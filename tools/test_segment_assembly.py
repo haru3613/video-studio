@@ -374,6 +374,9 @@ class SegmentAssemblyTest(unittest.TestCase):
             {
                 "schema": render_contract.RENDER_SCHEMA,
                 "status": "render_complete",
+                "render_input_revision": render_contract.render_input_revision(
+                    self.project
+                ),
                 "project": self.project.name,
                 "output": "output/final.mp4",
                 "video_sha256": segment_assembly.sha256(final),
@@ -527,7 +530,7 @@ class SegmentAssemblyTest(unittest.TestCase):
 
     def test_legacy_project_accepts_only_legacy_marker(self):
         (self.project / segment_plan.PLAN_PATH).unlink()
-        self.assertTrue(render_contract.describes_current_inputs(self.project, {}))
+        self.assertEqual(render_contract.assembly_binding_state(self.project, {}), "current")
         self.assertFalse(
             render_contract.describes_current_inputs(self.project, {"assembly": {}})
         )

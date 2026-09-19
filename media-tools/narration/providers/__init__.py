@@ -1,4 +1,11 @@
-from .base import AlignmentUnit, ProviderError, SynthesisResult, TTSProvider
+from .base import (
+    AlignmentUnit,
+    ProviderConfirmedFailure,
+    ProviderError,
+    ProviderSubmissionUnknown,
+    SynthesisResult,
+    TTSProvider,
+)
 from .elevenlabs import ElevenLabsProvider
 
 _PROVIDERS = {"elevenlabs": ElevenLabsProvider}

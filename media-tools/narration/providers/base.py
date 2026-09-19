@@ -25,6 +25,27 @@ class ProviderError(RuntimeError):
     """Raised for any provider-side failure (HTTP error, bad response shape)."""
 
 
+class ProviderConfirmedFailure(ProviderError):
+    """A failure proven to have happened before any billable acceptance."""
+
+    def __init__(self, message: str, *, proof: str):
+        super().__init__(message)
+        self.proof = proof
+
+
+class ProviderSubmissionUnknown(ProviderError):
+    """The request crossed the submit boundary but acceptance is unknown."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_request_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.provider_request_id = provider_request_id
+
+
 class TTSProvider(ABC):
     name: str = "abstract"
 

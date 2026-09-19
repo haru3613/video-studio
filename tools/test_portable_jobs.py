@@ -119,7 +119,9 @@ ffmpeg -y -hide_banner -loglevel error \\
         plan.pop("skip_pronunciation_gate", None)
         plan["narration"] = "narration-final.mp3"
         plan["narration_text"] = "narration.txt"
-        (self.project / "render_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        (self.project / "render_plan.json").write_text(
+            json.dumps(plan), encoding="utf-8"
+        )
 
     def test_client_exit_does_not_cancel_and_duplicate_start_is_idempotent(self):
         caller = subprocess.run(
@@ -158,7 +160,9 @@ ffmpeg -y -hide_banner -loglevel error \\
     def test_cancel_records_intent_and_only_terminates_owned_process_group(self):
         job, _response = self.start()
         job = self.wait_for(job["job_id"], {"running"})
-        unrelated = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+        unrelated = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 30"], start_new_session=True
+        )
         try:
             cancelled = portable_jobs.cancel(self.project, job["job_id"])
             self.assertEqual(cancelled["status"], "cancelled")
@@ -200,6 +204,63 @@ ffmpeg -y -hide_banner -loglevel error \\
         self.assertEqual(fenced["error_code"], "project_revision_changed")
         self.assertFalse((self.project / "output/final.mp4").exists())
 
+    def test_generated_webpack_cache_is_not_a_mutated_render_input(self):
+        self.install_real_renderer()
+        source = self.renderer.read_text()
+        source = source.replace(
+            "ffmpeg -y -hide_banner",
+            'test ! -e "$1/node_modules/.cache/untrusted-seed" || exit 45\n'
+            'mkdir -p "$1/node_modules/.cache/webpack"\n'
+            'printf generated > "$1/node_modules/.cache/webpack/index.pack"\n'
+            "ffmpeg -y -hide_banner",
+        )
+        self.renderer.write_text(source)
+        cache = self.remotion / "node_modules/.cache"
+        cache.mkdir()
+        (cache / "untrusted-seed").write_text(
+            "do not reuse a project-supplied compiler cache"
+        )
+        job, _response = self.start()
+        terminal = self.wait_for(
+            job["job_id"], {"succeeded", "failed", "interrupted"}, timeout=15
+        )
+        self.assertEqual(terminal["status"], "succeeded", terminal.get("error_code"))
+        self.assertTrue((self.project / "output/final.mp4").is_file())
+        self.assertTrue((cache / "untrusted-seed").is_file())
+
+    def test_visual_content_change_starts_a_new_render_instead_of_reusing_final(self):
+        self.install_real_renderer()
+        content = self.remotion / "src/content.json"
+        content.write_text('{"title":"first"}', encoding="utf-8")
+        first, _response = self.start()
+        first = self.wait_for(
+            first["job_id"], {"succeeded", "failed", "interrupted"}, timeout=15
+        )
+        self.assertEqual(first["status"], "succeeded", first.get("error_code"))
+        marker_path = self.project / "output/final.mp4.render-result"
+        first_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(first_marker["render_input_revision"], first["revision"])
+
+        reused, code = render_project.run(self.project, self.tools)
+        self.assertEqual((code, reused["code"]), (0, "render_complete"))
+
+        content.write_text('{"title":"changed"}', encoding="utf-8")
+        restarted, code = render_project.run(self.project, self.tools)
+        self.assertEqual((code, restarted["code"]), (0, "render_started"))
+        self.assertTrue(restarted["data"]["previous_final_preserved"])
+        second_id = restarted["data"]["job_id"]
+        self.jobs.append(second_id)
+        second = self.wait_for(
+            second_id, {"succeeded", "failed", "interrupted"}, timeout=15
+        )
+        self.assertEqual(second["status"], "succeeded", second.get("error_code"))
+        second_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(second_marker["render_input_revision"], second["revision"])
+        self.assertNotEqual(
+            second_marker["render_input_revision"],
+            first_marker["render_input_revision"],
+        )
+
     def test_interrupted_promotion_restores_the_previous_bytes(self):
         job, _response = self.start()
         job = self.wait_for(job["job_id"], {"running"})
@@ -211,7 +272,9 @@ ffmpeg -y -hide_banner -loglevel error \\
         output.write_bytes(b"previous diagnostic bytes")
         marker.write_text('{"previous":true}\n', encoding="utf-8")
         backup_video = self.project / "output/final.mp4.superseded-recovery"
-        backup_marker = self.project / "output/final.mp4.render-result.superseded-recovery"
+        backup_marker = (
+            self.project / "output/final.mp4.render-result.superseded-recovery"
+        )
         os.link(output, backup_video)
         backup_marker.write_bytes(marker.read_bytes())
         partial = self.project / "output/partial-candidate.mp4"
@@ -271,8 +334,7 @@ exit 9
             job, _response = self.start()
         failed = self.wait_for(job["job_id"], {"failed"})
         observed = (
-            Path(failed["snapshot_root"])
-            / "output/final.pre-loudnorm.mp4.browser"
+            Path(failed["snapshot_root"]) / "output/final.pre-loudnorm.mp4.browser"
         )
         self.assertEqual(observed.read_text(), str(browser.resolve()))
 
@@ -286,7 +348,9 @@ exit 9
         self.assertTrue(final.is_file())
         self.assertTrue(marker.is_file())
         original_digest = hashlib.sha256(final.read_bytes()).hexdigest()
-        self.assertEqual(json.loads(marker.read_text())["video_sha256"], original_digest)
+        self.assertEqual(
+            json.loads(marker.read_text())["video_sha256"], original_digest
+        )
         process = portable_jobs._CHILDREN.get(first["pid"])
         if process is not None:
             process.wait(timeout=5)
@@ -308,10 +372,16 @@ exit 9
         self.assertEqual(code, 0, response)
         retry_id = response["data"]["job_id"]
         self.jobs.append(retry_id)
-        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
+        self.assertEqual(
+            hashlib.sha256(final.read_bytes()).hexdigest(), original_digest
+        )
         self.wait_for(retry_id, {"failed"}, timeout=10)
-        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
-        self.assertEqual(json.loads(marker.read_text())["video_sha256"], original_digest)
+        self.assertEqual(
+            hashlib.sha256(final.read_bytes()).hexdigest(), original_digest
+        )
+        self.assertEqual(
+            json.loads(marker.read_text())["video_sha256"], original_digest
+        )
 
         self.install_real_renderer()
         resumed = portable_jobs.resume(self.project, retry_id)

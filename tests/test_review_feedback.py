@@ -84,6 +84,53 @@ def ui_comment_fixture(tmp_path: Path) -> tuple[Path, Path, dict, dict]:
     return workspace, project, review, response.json()["comment"]
 
 
+def ui_empty_fixture(tmp_path: Path) -> tuple[Path, Path, dict, TestClient]:
+    workspace = tmp_path / "workspace"
+    project = workspace / "projects" / "episode"
+    (project / "authoring").mkdir(parents=True)
+    (project / "output").mkdir()
+    (project / "output" / "cover.png").write_bytes(b"cover-v1")
+    (project / "authoring" / "review-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.review_package.v1",
+                "title": "Episode",
+                "assets": [
+                    {
+                        "id": "cover-current",
+                        "kind": "cover",
+                        "label": "Cover",
+                        "role": "current",
+                        "path": "output/cover.png",
+                    }
+                ],
+                "changes": [],
+                "chapters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    review_api.register_review_routes(
+        app,
+        {"studio": workspace / "projects"},
+        storage_root=workspace / ".video-studio" / "review",
+    )
+    client = TestClient(app, base_url="http://localhost")
+    return workspace, project, client.get("/api/review/studio/episode").json(), client
+
+
+def write_add_request(project: Path, request_id: str, payload: dict) -> None:
+    directory = project / ".hvp" / "review-requests"
+    directory.mkdir(parents=True, exist_ok=True)
+    request = directory / f"{request_id}.json"
+    request.write_text(
+        json.dumps({"schema": "video_studio.review_add_request.v1", **payload}),
+        encoding="utf-8",
+    )
+    request.chmod(0o400)
+
+
 def test_reads_actual_ui_store_without_fastapi_or_private_state(tmp_path: Path) -> None:
     workspace, project, review, created = ui_comment_fixture(tmp_path)
     code, result = invoke("read", project)
@@ -91,6 +138,8 @@ def test_reads_actual_ui_store_without_fastapi_or_private_state(tmp_path: Path) 
     assert code == 0
     assert result["schema"] == "video_studio.review_feedback.v1"
     assert result["package_id"] == review["package_id"]
+    assert result["assets"][0]["id"] == "cover-current"
+    assert result["assets"][0]["sha256"] == review["assets"][0]["sha256"]
     assert result["counts"] == {"total": 1, "open": 1, "resolved": 0, "stale": 0}
     comment = result["comments"][0]
     assert comment["id"] == created["id"]
@@ -105,6 +154,96 @@ def test_reads_actual_ui_store_without_fastapi_or_private_state(tmp_path: Path) 
 
     store = next((workspace / ".video-studio" / "review").glob("*/feedback.json"))
     assert json.loads(store.read_text(encoding="utf-8"))["schema"] == "haru.review_feedback.v1"
+
+
+def test_cli_add_uses_shared_ui_domain_and_is_idempotent(tmp_path: Path) -> None:
+    _, project, review, client = ui_empty_fixture(tmp_path)
+    request_id = "a" * 32
+    client_id = str(uuid.uuid4())
+    payload = {
+        "client_id": client_id,
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Please adjust the cover spacing.",
+    }
+    write_add_request(project, request_id, payload)
+
+    code, added = invoke("add", project, "--request-id", request_id)
+    assert code == 0
+    assert added["schema"] == "video_studio.review_add.v1"
+    assert added["code"] == "review_comment_added"
+    assert added["comment"]["asset"]["id"] == "cover-current"
+    assert added["effects"] == {
+        "technical_qa_pass": False,
+        "human_approval": False,
+        "publishing_approval": False,
+    }
+
+    code, repeated = invoke("add", project, "--request-id", request_id)
+    assert code == 0
+    assert repeated["code"] == "review_comment_existing"
+    assert repeated["comment"]["id"] == added["comment"]["id"]
+    ui_review = client.get("/api/review/studio/episode").json()
+    assert ui_review["comments"][0]["id"] == added["comment"]["id"]
+    assert ui_review["comments"][0]["body"] == payload["body"]
+
+
+def test_cli_add_rejects_stale_asset_and_unsafe_request_file(tmp_path: Path) -> None:
+    _, project, review, _client = ui_empty_fixture(tmp_path)
+    payload = {
+        "client_id": str(uuid.uuid4()),
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Current bytes only.",
+    }
+    request_id = "b" * 32
+    write_add_request(project, request_id, payload)
+    (project / "output" / "cover.png").write_bytes(b"changed")
+    code, stale = invoke("add", project, "--request-id", request_id)
+    assert code == 3
+    assert stale["code"] == "review_stale"
+
+    unsafe_id = "c" * 32
+    write_add_request(project, unsafe_id, payload)
+    (project / ".hvp/review-requests" / f"{unsafe_id}.json").chmod(0o644)
+    code, unsafe = invoke("add", project, "--request-id", unsafe_id)
+    assert code == 2
+    assert unsafe["code"] == "review_request_invalid"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"client_id": "12345678-1234-1234-1234-123456789ABC"},
+        {"body": "x" * 5001},
+        {"timestamp_seconds": float("nan")},
+        {"timestamp_seconds": 0},
+    ],
+)
+def test_cli_add_rejects_invalid_uuid_body_and_cover_timestamp(
+    tmp_path: Path, override: dict
+) -> None:
+    _, project, review, _client = ui_empty_fixture(tmp_path)
+    payload = {
+        "client_id": str(uuid.uuid4()),
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Valid comment",
+        **override,
+    }
+    request_id = uuid.uuid4().hex
+    write_add_request(project, request_id, payload)
+
+    code, result = invoke("add", project, "--request-id", request_id)
+
+    assert code == 2
+    assert result["code"] == "invalid_input"
 
 
 def test_resolve_and_reopen_are_bound_idempotent_review_only_changes(tmp_path: Path) -> None:

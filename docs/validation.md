@@ -9,6 +9,18 @@ The source was extracted from Studio commit
 configuration and installation while preserving the production schemas and
 quality gates. New local delivery is explicitly separate from publication.
 
+Pre-review integrated source verification completed with 117 Rust tests,
+624 Python tests plus 81 subtests, and 18 Swift tests. A clean installation of
+`8ea6c3f9158a5d3c9e74f7b56814428a4320843c` succeeded with an isolated runtime
+home and shared compiler/package caches; stale Haru runtime override variables
+were ignored. This is not a claim of a new-machine install with no shared cache.
+
+The requested first independent review of `c67feba` returned **FAIL**. Work is
+continuing on HTTP intake, complete installed CLI operations, durable provider
+spend, diagnostic delivery, media history, and generic operator profiles. Scope
+was reconciled with the user's later request to preserve existing workflows.
+No release-complete claim has been made.
+
 Recorded slice evidence (not a substitute for the final integrated candidate):
 
 - Real immutable self-build installation, verification, corrupt/stale runtime

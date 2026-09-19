@@ -88,7 +88,9 @@
   "binaries": ["hvp-mcp", "hvp-runtime", "hvp-state", "video-studio"],
   "tools": [
     "approve_publish",
+    "artifact_import",
     "artifact_index",
+    "artifact_stage",
     "create",
     "delivery_status",
     "export_delivery",
@@ -103,17 +105,21 @@
     "prepare_publish",
     "prepare_publish_approval",
     "produce_artifact",
+    "produce_staged_artifact",
+    "project_list",
     "pronunciation_review",
     "publish",
     "reconcile_upload",
     "record_selection",
     "replace_thumbnail",
+    "review_add",
     "review_feedback",
     "review_resolve",
     "run_next",
     "select",
     "status",
     "verify",
-    "visual_qa"
+    "visual_qa",
+    "workspace_info"
   ]
 }

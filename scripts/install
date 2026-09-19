@@ -17,6 +17,8 @@ if [[ -e "$CLI_TARGET" || -L "$CLI_TARGET" ]]; then
   fi
 fi
 "$ROOT/scripts/setup"
+UV_PROJECT_ENVIRONMENT="$HOME/.local/share/video-studio/python" \
+  uv sync --locked --project "$ROOT" --python 3.11
 HVP_RUNTIME_STATE="$HOME/.local/state/video-studio/runtime" \
 HVP_LAUNCHER_PATH="$HOME/.local/share/video-studio/bin/video-studio-mcp" \
   "$ROOT/pipeline/target/debug/hvp-runtime" install-source --repo "$ROOT"

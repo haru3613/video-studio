@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -229,6 +231,103 @@ pub fn select(projects_root: &Path, slug: &str) -> AppResult {
         return AppResult::invalid_input();
     };
     AppResult::ok("project_selected", &project, None)
+}
+
+fn workspace_manifest(root: &Path) -> io::Result<(PathBuf, Value)> {
+    let root = direct_directory(root)?;
+    let manifest_path = direct_file(&root.join("workspace.json"))?;
+    let manifest: Value = serde_json::from_slice(&fs::read(manifest_path)?).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("workspace manifest: {error}"),
+        )
+    })?;
+    if manifest.get("schema").and_then(Value::as_str) != Some("video_studio.workspace.v1")
+        || manifest
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid workspace manifest",
+        ));
+    }
+    let projects = direct_directory(&root.join("projects"))?;
+    if projects.parent() != Some(root.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid projects root",
+        ));
+    }
+    Ok((root, manifest))
+}
+
+fn workspace_projects(root: &Path) -> io::Result<Vec<Value>> {
+    let mut projects = Vec::new();
+    let projects_root = root.join("projects");
+    for entry in fs::read_dir(&projects_root)? {
+        let entry = entry?;
+        let metadata = entry.file_type()?;
+        let Some(project_id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if metadata.is_symlink() || !metadata.is_dir() || !valid_slug(&project_id) {
+            continue;
+        }
+        let project = entry.path().canonicalize()?;
+        if project.parent() != Some(projects_root.as_path()) {
+            continue;
+        }
+        let contract = project.join("project-contract.json");
+        projects.push(serde_json::json!({
+            "project_id": project_id,
+            "initialized": contract.is_file() && !contract.is_symlink(),
+        }));
+    }
+    projects.sort_by(|left, right| {
+        left["project_id"]
+            .as_str()
+            .cmp(&right["project_id"].as_str())
+    });
+    Ok(projects)
+}
+
+pub fn workspace_info(workspace_root: &Path) -> AppResult {
+    let Ok((root, manifest)) = workspace_manifest(workspace_root) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(projects) = workspace_projects(&root) else {
+        return AppResult::error("internal_error", Some(&root));
+    };
+    AppResult::ok(
+        "workspace_info",
+        &root,
+        Some(serde_json::json!({
+            "schema": "video_studio.workspace_info.v1",
+            "workspace_id": manifest["workspace_id"],
+            "project_count": projects.len(),
+        })),
+    )
+}
+
+pub fn project_list(workspace_root: &Path) -> AppResult {
+    let Ok((root, manifest)) = workspace_manifest(workspace_root) else {
+        return AppResult::invalid_input();
+    };
+    match workspace_projects(&root) {
+        Ok(projects) => AppResult::ok(
+            "project_list",
+            &root,
+            Some(serde_json::json!({
+                "schema": "video_studio.project_list.v1",
+                "workspace_id": manifest["workspace_id"],
+                "projects": projects,
+            })),
+        ),
+        Err(_) => AppResult::error("internal_error", Some(&root)),
+    }
 }
 
 pub fn record_selection(
@@ -473,12 +572,14 @@ impl CommandExecutor for ProcessExecutor {
         }
         match program.file_name().and_then(|name| name.to_str()) {
             Some("pronunciation-workflow") => {
+                let mut configured_python = false;
                 for name in [
                     "ELEVENLABS_API_KEY",
                     "ELEVENLABS_API_KEY_PATH",
                     "VIDEO_STUDIO_TTS_VOICE_ID",
                     "VIDEO_STUDIO_TTS_MODEL",
                     "VIDEO_STUDIO_TTS_MAX_CREDITS",
+                    "VIDEO_STUDIO_TTS_SPEND_JOURNAL",
                     "VIDEO_STUDIO_TTS_PYTHON",
                     "HARU_TTS_PYTHON",
                     "VIDEO_STUDIO_G2PW_PYTHON",
@@ -490,7 +591,19 @@ impl CommandExecutor for ProcessExecutor {
                     "VIDEO_STUDIO_VOICE_RULES_DIR",
                 ] {
                     if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+                        if matches!(name, "VIDEO_STUDIO_TTS_PYTHON" | "HARU_TTS_PYTHON") {
+                            configured_python = true;
+                        }
                         command.env(name, value);
+                    }
+                }
+                if !configured_python
+                    && let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty())
+                {
+                    let managed =
+                        PathBuf::from(home).join(".local/share/video-studio/python/bin/python");
+                    if managed.is_file() {
+                        command.env("VIDEO_STUDIO_TTS_PYTHON", managed);
                     }
                 }
             }
@@ -885,6 +998,7 @@ pub struct ExportDeliveryRequest {
     pub project_root: PathBuf,
     pub lease: LeaseInput,
     pub idempotency_key: String,
+    pub diagnostic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -897,11 +1011,46 @@ pub struct JobMutationRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewResolutionRequest {
     pub project_root: PathBuf,
-    pub lease: LeaseInput,
     pub comment_id: String,
     pub status: String,
     pub expected_package_id: String,
     pub expected_asset_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewAddRequest {
+    pub project_root: PathBuf,
+    pub client_id: String,
+    pub package_id: String,
+    pub asset_id: String,
+    pub asset_sha256: String,
+    pub timestamp_seconds: Option<f64>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactStageRequest {
+    pub project_root: PathBuf,
+    pub lease: LeaseInput,
+    pub role: String,
+    pub inbox_path: Option<String>,
+    pub inline_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactImportRequest {
+    pub project_root: PathBuf,
+    pub lease: LeaseInput,
+    pub stage_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProduceStagedArtifactRequest {
+    pub project_root: PathBuf,
+    pub lease: LeaseInput,
+    pub stage_id: String,
+    pub artifact: String,
+    pub produced_by: String,
 }
 
 fn cover_ready(data: &Option<Value>, project: &Path) -> bool {
@@ -2300,6 +2449,487 @@ fn self_eval_review_json(
     serde_json::to_string(&payload).ok()
 }
 
+fn valid_stage_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn intake_role(value: &str) -> bool {
+    matches!(
+        value,
+        "source_video"
+            | "reference_image"
+            | "reference_audio"
+            | "background_music"
+            | "sound_effect"
+            | "subtitle"
+            | "script_notes"
+            | "storyboard_data"
+            | "metadata"
+    )
+}
+
+fn safe_inbox_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= 1024
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn inline_intake_request(project: &Path, role: &str, text: &str) -> io::Result<(String, PathBuf)> {
+    let mut digest = Sha256::new();
+    digest.update(b"video_studio.inline_intake.v1\0");
+    digest.update(role.as_bytes());
+    digest.update([0]);
+    digest.update(text.as_bytes());
+    let request_id = format!("{:x}", digest.finalize())[..32].to_owned();
+    let state = project.join(".hvp");
+    let metadata = fs::symlink_metadata(&state)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsafe project state",
+        ));
+    }
+    let requests = state.join("intake-requests");
+    match fs::symlink_metadata(&requests) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe intake requests",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&requests)?,
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&requests, fs::Permissions::from_mode(0o700))?;
+    let path = requests.join(format!("{request_id}.txt"));
+    match OpenOptions::new().create_new(true).write(true).open(&path) {
+        Ok(mut output) => {
+            output.write_all(text.as_bytes())?;
+            output.sync_all()?;
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || fs::read(&path)? != text.as_bytes()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "inline intake request conflicts",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    Ok((request_id, path))
+}
+
+fn artifact_stage_valid(data: &Value, project: &Path, role: &str) -> bool {
+    let Some(envelope) = data.as_object() else {
+        return false;
+    };
+    let Some(stage) = envelope.get("data").and_then(Value::as_object) else {
+        return false;
+    };
+    envelope.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && envelope.get("outcome").and_then(Value::as_str) == Some("ok")
+        && envelope.get("code").and_then(Value::as_str) == Some("artifact_staged")
+        && envelope.get("project").and_then(Value::as_str)
+            == Some(project.to_string_lossy().as_ref())
+        && stage.get("schema").and_then(Value::as_str) == Some("video_studio.artifact_stage.v1")
+        && stage
+            .get("stage_id")
+            .and_then(Value::as_str)
+            .is_some_and(valid_stage_id)
+        && stage
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(intake_role)
+        && stage.get("role").and_then(Value::as_str) == Some(role)
+        && stage
+            .get("extension")
+            .and_then(Value::as_str)
+            .is_some_and(|value| {
+                value.starts_with('.')
+                    && value.len() <= 8
+                    && value
+                        .bytes()
+                        .skip(1)
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+        && stage
+            .get("sha256")
+            .and_then(Value::as_str)
+            .is_some_and(is_sha256)
+        && stage
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
+        && stage
+            .get("blob")
+            .and_then(Value::as_str)
+            .is_some_and(|blob| {
+                blob == format!(
+                    ".hvp/staging/intake/{}/blob",
+                    stage
+                        .get("stage_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                )
+            })
+}
+
+fn artifact_import_valid(data: &Value, project: &Path, stage_id: &str) -> bool {
+    let Some(envelope) = data.as_object() else {
+        return false;
+    };
+    let Some(imported) = envelope.get("data").and_then(Value::as_object) else {
+        return false;
+    };
+    let path = imported
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    envelope.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && envelope.get("outcome").and_then(Value::as_str) == Some("ok")
+        && envelope.get("code").and_then(Value::as_str) == Some("artifact_imported")
+        && envelope.get("project").and_then(Value::as_str)
+            == Some(project.to_string_lossy().as_ref())
+        && imported.get("schema").and_then(Value::as_str) == Some("video_studio.artifact_import.v1")
+        && imported.get("stage_id").and_then(Value::as_str) == Some(stage_id)
+        && imported
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(intake_role)
+        && imported
+            .get("sha256")
+            .and_then(Value::as_str)
+            .is_some_and(is_sha256)
+        && imported
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
+        && safe_inbox_path(path)
+        && path.starts_with("imports/")
+}
+
+fn intake_failure(result: CommandResult, project: &Path) -> AppResult {
+    let code = result
+        .data
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("command_failed")
+        .to_owned();
+    if result.exit_code == Some(3) && matches!(code.as_str(), "stage_conflict" | "import_conflict")
+    {
+        AppResult::blocked_with_data(&code, project, result.data)
+    } else if result.exit_code == Some(2)
+        && matches!(
+            code.as_str(),
+            "invalid_input"
+                | "invalid_path"
+                | "invalid_workspace"
+                | "invalid_project"
+                | "invalid_inbox_path"
+                | "unsupported_role"
+                | "artifact_too_large"
+                | "artifact_type_invalid"
+                | "inline_role_invalid"
+                | "invalid_stage_id"
+                | "stage_not_found"
+                | "stage_invalid"
+                | "invalid_request_id"
+                | "inline_request_not_found"
+        )
+    {
+        AppResult::error_with_data(&code, Some(project), result.data)
+    } else {
+        AppResult::error_with_data("command_failed", Some(project), result.data)
+    }
+}
+
+pub fn artifact_stage(
+    request: &ArtifactStageRequest,
+    repo_root: &Path,
+    executor: &mut impl CommandExecutor,
+) -> AppResult {
+    let Ok(project) = direct_directory(&request.project_root) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(repo) = direct_directory(repo_root) else {
+        return AppResult::invalid_input();
+    };
+    let source_count =
+        usize::from(request.inbox_path.is_some()) + usize::from(request.inline_text.is_some());
+    if !intake_role(&request.role)
+        || source_count != 1
+        || request
+            .inbox_path
+            .as_deref()
+            .is_some_and(|value| !safe_inbox_path(value))
+        || request
+            .inline_text
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || value.len() > 1024 * 1024)
+    {
+        return AppResult::invalid_input();
+    }
+    let Ok(workspace) = project_workspace(&project) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(program) = direct_file(&repo.join("scripts/artifact-intake")) else {
+        return AppResult::error("runner_unavailable", Some(&project));
+    };
+    let token = &request.lease.capability;
+    let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
+        &request.lease.owner,
+        &request.lease.lease_id,
+        request.lease.generation,
+        token,
+        SystemTime::now(),
+        || {
+            let (arguments, request_path) = match (&request.inbox_path, &request.inline_text) {
+                (Some(path), None) => (
+                    vec![
+                        OsString::from("stage-inbox"),
+                        workspace.clone().into_os_string(),
+                        project.clone().into_os_string(),
+                        request.role.clone().into(),
+                        path.clone().into(),
+                    ],
+                    None,
+                ),
+                (None, Some(text)) => {
+                    let (request_id, path) = inline_intake_request(&project, &request.role, text)
+                        .map_err(StoreError::Io)?;
+                    (
+                        vec![
+                            OsString::from("stage-inline-file"),
+                            workspace.clone().into_os_string(),
+                            project.clone().into_os_string(),
+                            request.role.clone().into(),
+                            request_id.into(),
+                        ],
+                        Some(path),
+                    )
+                }
+                _ => {
+                    return Err(StoreError::InvalidProviderRequest(
+                        "invalid intake source".to_owned(),
+                    ));
+                }
+            };
+            let result = executor
+                .execute(&program, &arguments)
+                .map_err(StoreError::Io);
+            if let Some(path) = request_path {
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) if result.is_ok() => return Err(StoreError::Io(error)),
+                    Err(_) => {}
+                }
+            }
+            result
+        },
+    );
+    match execution {
+        Ok(result)
+            if result.exit_code == Some(0)
+                && artifact_stage_valid(
+                    result.data.as_ref().unwrap_or(&Value::Null),
+                    &project,
+                    &request.role,
+                ) =>
+        {
+            AppResult::ok(
+                "artifact_staged",
+                &project,
+                result.data.and_then(|value| value.get("data").cloned()),
+            )
+        }
+        Ok(result) => intake_failure(result, &project),
+        Err(StoreError::LeaseMismatch | StoreError::LeaseExpired) => {
+            AppResult::blocked("lease_invalid", &project)
+        }
+        Err(StoreError::Io(_)) => AppResult::error("runner_unavailable", Some(&project)),
+        Err(_) => AppResult::error("internal_error", Some(&project)),
+    }
+}
+
+pub fn artifact_import(
+    request: &ArtifactImportRequest,
+    repo_root: &Path,
+    executor: &mut impl CommandExecutor,
+) -> AppResult {
+    let Ok(project) = direct_directory(&request.project_root) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(repo) = direct_directory(repo_root) else {
+        return AppResult::invalid_input();
+    };
+    if !valid_stage_id(&request.stage_id) {
+        return AppResult::invalid_input();
+    }
+    let Ok(workspace) = project_workspace(&project) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(program) = direct_file(&repo.join("scripts/artifact-intake")) else {
+        return AppResult::error("runner_unavailable", Some(&project));
+    };
+    let arguments = [
+        OsString::from("import"),
+        workspace.into_os_string(),
+        project.clone().into_os_string(),
+        request.stage_id.clone().into(),
+    ];
+    let token = &request.lease.capability;
+    let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
+        &request.lease.owner,
+        &request.lease.lease_id,
+        request.lease.generation,
+        token,
+        SystemTime::now(),
+        || {
+            executor
+                .execute(&program, &arguments)
+                .map_err(StoreError::Io)
+        },
+    );
+    match execution {
+        Ok(result)
+            if result.exit_code == Some(0)
+                && artifact_import_valid(
+                    result.data.as_ref().unwrap_or(&Value::Null),
+                    &project,
+                    &request.stage_id,
+                ) =>
+        {
+            AppResult::ok(
+                "artifact_imported",
+                &project,
+                result.data.and_then(|value| value.get("data").cloned()),
+            )
+        }
+        Ok(result) => intake_failure(result, &project),
+        Err(StoreError::LeaseMismatch | StoreError::LeaseExpired) => {
+            AppResult::blocked("lease_invalid", &project)
+        }
+        Err(StoreError::Io(_)) => AppResult::error("runner_unavailable", Some(&project)),
+        Err(_) => AppResult::error("internal_error", Some(&project)),
+    }
+}
+
+const STAGED_PRODUCE_TARGETS: &[(&str, &[&str])] = &[
+    (
+        "script_notes",
+        &["script-proposal.md", "sources.md", "issue_brief.md"],
+    ),
+    (
+        "storyboard_data",
+        &["storyboard-final-timed.json", "editorial-contract.json"],
+    ),
+    ("metadata", &["claims.json", "publish-metadata.json"]),
+];
+
+pub fn produce_staged_artifact(
+    request: &ProduceStagedArtifactRequest,
+    repo_root: &Path,
+    executor: &mut impl CommandExecutor,
+) -> AppResult {
+    let Ok(project) = direct_directory(&request.project_root) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(repo) = direct_directory(repo_root) else {
+        return AppResult::invalid_input();
+    };
+    if !valid_stage_id(&request.stage_id) || request.produced_by.trim().is_empty() {
+        return AppResult::invalid_input();
+    }
+    let Ok(workspace) = project_workspace(&project) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(program) = direct_file(&repo.join("scripts/artifact-intake")) else {
+        return AppResult::error("runner_unavailable", Some(&project));
+    };
+    let arguments = [
+        OsString::from("resolve"),
+        workspace.into_os_string(),
+        project.clone().into_os_string(),
+        request.stage_id.clone().into(),
+    ];
+    let resolved = match executor.execute(&program, &arguments) {
+        Ok(result)
+            if result.exit_code == Some(0)
+                && artifact_stage_valid(
+                    result.data.as_ref().unwrap_or(&Value::Null),
+                    &project,
+                    result
+                        .data
+                        .as_ref()
+                        .and_then(|value| value.pointer("/data/role"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ) =>
+        {
+            result
+        }
+        Ok(result) => return intake_failure(result, &project),
+        Err(_) => return AppResult::error("runner_unavailable", Some(&project)),
+    };
+    let Some(stage) = resolved.data.and_then(|value| value.get("data").cloned()) else {
+        return AppResult::error("command_failed", Some(&project));
+    };
+    if stage.get("stage_id").and_then(Value::as_str) != Some(request.stage_id.as_str()) {
+        return AppResult::error("command_failed", Some(&project));
+    }
+    let role = stage
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let allowed = STAGED_PRODUCE_TARGETS
+        .iter()
+        .find(|(named, _)| *named == role)
+        .is_some_and(|(_, targets)| targets.contains(&request.artifact.as_str()));
+    if !allowed {
+        return AppResult::blocked_with_data(
+            "staged_artifact_target_refused",
+            &project,
+            Some(serde_json::json!({
+                "role": role,
+                "artifact": request.artifact,
+                "allowed_targets": STAGED_PRODUCE_TARGETS,
+            })),
+        );
+    }
+    let Some(blob) = stage.get("blob").and_then(Value::as_str) else {
+        return AppResult::error("command_failed", Some(&project));
+    };
+    produce_artifact(
+        &ProduceArtifactRequest {
+            project_root: project,
+            lease: request.lease.clone(),
+            artifact: request.artifact.clone(),
+            source_file: request.project_root.join(blob),
+            produced_by: request.produced_by.clone(),
+        },
+        &repo,
+        executor,
+    )
+}
+
 pub fn produce_artifact(
     request: &ProduceArtifactRequest,
     repo_root: &Path,
@@ -2749,6 +3379,19 @@ fn local_delivery_payload_valid(data: &Value, project: &Path, export: bool) -> b
         && payload.get("human_approval").and_then(Value::as_bool) == Some(false)
 }
 
+fn diagnostic_export_valid(data: &Value, project: &Path) -> bool {
+    let Some(payload) = data.as_object() else {
+        return false;
+    };
+    payload.get("schema").and_then(Value::as_str) == Some("video_studio.diagnostic_export.v1")
+        && payload.get("project").and_then(Value::as_str)
+            == project.file_name().and_then(|name| name.to_str())
+        && payload.get("status").and_then(Value::as_str) == Some("diagnostic_only")
+        && payload.get("delivery_ready").and_then(Value::as_bool) == Some(false)
+        && payload.get("publication_ready").and_then(Value::as_bool) == Some(false)
+        && payload.get("human_approval").and_then(Value::as_bool) == Some(false)
+}
+
 /// Run fresh, read-only technical delivery checks. This intentionally does not
 /// call the publication verifier and never promotes technical playability into
 /// pronunciation, content, visual, or publication approval.
@@ -2807,12 +3450,15 @@ pub fn export_delivery(
     let Ok(program) = direct_file(&repo.join("scripts/local-delivery")) else {
         return AppResult::error("runner_unavailable", Some(&project));
     };
-    let arguments = [
+    let mut arguments = vec![
         OsString::from("export"),
         project.clone().into_os_string(),
         OsString::from("--idempotency-key"),
         request.idempotency_key.clone().into(),
     ];
+    if request.diagnostic {
+        arguments.push(OsString::from("--diagnostic"));
+    }
     let token = &request.lease.capability;
     let mut executor_failed = false;
     let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
@@ -2834,10 +3480,21 @@ pub fn export_delivery(
             else {
                 return AppResult::error_with_data("command_failed", Some(&project), result.data);
             };
+            let expected_code = if request.diagnostic {
+                "diagnostics_exported"
+            } else {
+                "delivery_exported"
+            };
+            let payload_valid = if request.diagnostic {
+                diagnostic_export_valid(&data, &project)
+            } else {
+                local_delivery_payload_valid(&data, &project, true)
+                    && data.get("status").and_then(Value::as_str) == Some("exported")
+            };
             if result.exit_code == Some(0)
                 && outcome == "ok"
-                && code == "delivery_exported"
-                && local_delivery_payload_valid(&data, &project, true)
+                && code == expected_code
+                && payload_valid
                 && data
                     .get("bundle_id")
                     .and_then(Value::as_str)
@@ -2847,7 +3504,7 @@ pub fn export_delivery(
                     .and_then(Value::as_str)
                     .is_some_and(|path| Path::new(path).is_absolute())
             {
-                AppResult::ok("delivery_exported", &project, Some(data))
+                AppResult::ok(expected_code, &project, Some(data))
             } else if result.exit_code == Some(3) && outcome == "blocked" {
                 AppResult::blocked_with_data(&code, &project, Some(data))
             } else {
@@ -3233,6 +3890,221 @@ fn review_resolution_valid(
             })
 }
 
+fn review_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn review_add_request_file(
+    project: &Path,
+    request: &ReviewAddRequest,
+) -> io::Result<(String, PathBuf)> {
+    let value = serde_json::json!({
+        "schema": "video_studio.review_add_request.v1",
+        "client_id": request.client_id,
+        "package_id": request.package_id,
+        "asset_id": request.asset_id,
+        "asset_sha256": request.asset_sha256,
+        "timestamp_seconds": request.timestamp_seconds,
+        "body": request.body.trim(),
+    });
+    let payload = serde_json::to_vec(&value).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("review request: {error}"),
+        )
+    })?;
+    let request_id = format!("{:x}", Sha256::digest(&payload))[..32].to_owned();
+    let state = project.join(".hvp");
+    match fs::symlink_metadata(&state) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe project state",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&state)?,
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+    let requests = state.join("review-requests");
+    match fs::symlink_metadata(&requests) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe review requests",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&requests)?,
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&requests, fs::Permissions::from_mode(0o700))?;
+    let path = requests.join(format!("{request_id}.json"));
+    match OpenOptions::new().create_new(true).write(true).open(&path) {
+        Ok(mut output) => {
+            output.write_all(&payload)?;
+            output.sync_all()?;
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || fs::read(&path)? != payload
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "review request conflicts",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    Ok((request_id, path))
+}
+
+fn review_add_valid(data: &Value, project: &Path, request: &ReviewAddRequest) -> bool {
+    let Some(value) = data.as_object() else {
+        return false;
+    };
+    let Some(comment) = value.get("comment").and_then(Value::as_object) else {
+        return false;
+    };
+    value.get("schema").and_then(Value::as_str) == Some("video_studio.review_add.v1")
+        && value.get("outcome").and_then(Value::as_str) == Some("ok")
+        && value
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| matches!(code, "review_comment_added" | "review_comment_existing"))
+        && value.get("project").and_then(Value::as_str)
+            == project.file_name().and_then(|name| name.to_str())
+        && value.get("package_id").and_then(Value::as_str) == Some(request.package_id.as_str())
+        && comment
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(valid_comment_id)
+        && comment
+            .get("asset")
+            .and_then(Value::as_object)
+            .and_then(|asset| asset.get("id"))
+            .and_then(Value::as_str)
+            == Some(request.asset_id.as_str())
+        && comment
+            .get("asset")
+            .and_then(Value::as_object)
+            .and_then(|asset| asset.get("sha256"))
+            .and_then(Value::as_str)
+            == Some(request.asset_sha256.as_str())
+        && value
+            .get("effects")
+            .and_then(Value::as_object)
+            .is_some_and(|effects| {
+                !effects.is_empty()
+                    && effects
+                        .values()
+                        .all(|effect| effect.as_bool() == Some(false))
+            })
+}
+
+pub fn review_add(
+    request: &ReviewAddRequest,
+    repo_root: &Path,
+    executor: &mut impl CommandExecutor,
+) -> AppResult {
+    let Ok(project) = direct_directory(&request.project_root) else {
+        return AppResult::invalid_input();
+    };
+    let Ok(repo) = direct_directory(repo_root) else {
+        return AppResult::invalid_input();
+    };
+    if !valid_comment_id(&request.client_id)
+        || !is_sha256(&request.package_id)
+        || !review_identifier(&request.asset_id)
+        || !is_sha256(&request.asset_sha256)
+        || request
+            .timestamp_seconds
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || request.body.trim().is_empty()
+        || request.body.len() > 5000
+    {
+        return AppResult::invalid_input();
+    }
+    let Ok(program) = direct_file(&repo.join("scripts/review-feedback")) else {
+        return AppResult::error("runner_unavailable", Some(&project));
+    };
+    let (request_id, request_path) = match review_add_request_file(&project, request) {
+        Ok(value) => value,
+        Err(_) => return AppResult::error("internal_error", Some(&project)),
+    };
+    let arguments = [
+        OsString::from("add"),
+        project.clone().into_os_string(),
+        OsString::from("--request-id"),
+        request_id.into(),
+    ];
+    let result = executor.execute(&program, &arguments);
+    match fs::remove_file(request_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) if result.is_ok() => return AppResult::error("internal_error", Some(&project)),
+        Err(_) => {}
+    }
+    match result {
+        Ok(result)
+            if result.exit_code == Some(0)
+                && review_add_valid(
+                    result.data.as_ref().unwrap_or(&Value::Null),
+                    &project,
+                    request,
+                ) =>
+        {
+            let code = result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("review_comment_added")
+                .to_owned();
+            AppResult::ok(&code, &project, result.data)
+        }
+        Ok(result) if result.exit_code == Some(3) => {
+            let code = result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("review_conflict")
+                .to_owned();
+            if matches!(code.as_str(), "review_conflict" | "review_stale") {
+                AppResult::blocked_with_data(&code, &project, result.data)
+            } else {
+                AppResult::error_with_data("command_failed", Some(&project), result.data)
+            }
+        }
+        Ok(result) if result.exit_code == Some(2) => {
+            let code = result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("invalid_input")
+                .to_owned();
+            AppResult::error_with_data(&code, Some(&project), result.data)
+        }
+        Ok(result) => AppResult::error_with_data("command_failed", Some(&project), result.data),
+        Err(_) => AppResult::error("runner_unavailable", Some(&project)),
+    }
+}
+
 pub fn review_feedback(
     project_root: &Path,
     repo_root: &Path,
@@ -3310,22 +4182,7 @@ pub fn review_resolve(
         OsString::from("--expected-asset-sha256"),
         request.expected_asset_sha256.clone().into(),
     ];
-    let token = &request.lease.capability;
-    let mut executor_failed = false;
-    let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
-        &request.lease.owner,
-        &request.lease.lease_id,
-        request.lease.generation,
-        token,
-        SystemTime::now(),
-        || {
-            executor.execute(&program, &arguments).map_err(|error| {
-                executor_failed = true;
-                StoreError::Io(error)
-            })
-        },
-    );
-    match execution {
+    match executor.execute(&program, &arguments) {
         Ok(result)
             if result.exit_code == Some(0)
                 && review_resolution_valid(
@@ -3372,14 +4229,7 @@ pub fn review_resolve(
             }
         }
         Ok(result) => AppResult::error_with_data("command_failed", Some(&project), result.data),
-        Err(StoreError::LeaseMismatch | StoreError::LeaseExpired) => {
-            AppResult::blocked("lease_invalid", &project)
-        }
-        Err(StoreError::Io(_)) if executor_failed => {
-            AppResult::error("runner_unavailable", Some(&project))
-        }
-        Err(StoreError::Io(_)) => AppResult::error("internal_error", Some(&project)),
-        Err(_) => AppResult::error("internal_error", Some(&project)),
+        Err(_) => AppResult::error("runner_unavailable", Some(&project)),
     }
 }
 

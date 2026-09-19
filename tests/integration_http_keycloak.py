@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Isolated real-Keycloak integration check for the HTTP MCP gateway.
 
-This script creates and removes one task-labelled Keycloak container, one
-throwaway realm, and a temporary fake stdio MCP backend. It never installs or
-invokes the user's active Video Studio runtime.
+This script creates and removes task-labelled Keycloak/Nginx containers and a
+throwaway realm. By default it uses a temporary fake stdio MCP backend for the
+authorization matrix. With ``--context`` it probes and uses an isolated
+installed candidate only when that backend exposes the complete required tool
+surface. It never invokes the user's original Haru runtime.
 """
 
 from __future__ import annotations
 
 import asyncio
+import argparse
 import base64
 import contextlib
 import hashlib
@@ -39,7 +42,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,8 +56,14 @@ from tools.http_mcp import (
     REVIEW_SCOPE,
     HttpMcpConfig,
     JwksTokenVerifier,
+    TOOL_SCOPES,
     build_app,
 )
+from tools.workspace import initialize as initialize_workspace
+
+if str(REPO_ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+from test_http_mcp import backend_schema
 
 
 KEYCLOAK_IMAGE = (
@@ -712,47 +722,27 @@ async def serve_gateway(app: Any) -> AsyncIterator[int]:
 
 def write_fake_backend(directory: Path) -> Path:
     executable = directory / "fake-video-studio-mcp"
-    tool_names = [
-        "create",
-        "select",
-        "status",
-        "artifact_index",
-        "record_selection",
-        "lease_claim",
-        "lease_renew",
-        "lease_status",
-        "lease_release",
-        "run_next",
-        "verify",
-        "delivery_status",
-        "export_delivery",
-        "job_status",
-        "job_logs",
-        "job_cancel",
-        "job_resume",
-        "review_feedback",
-        "review_resolve",
-        "visual_qa",
-        "pronunciation_review",
-        "produce_artifact",
-    ]
+    tool_names = sorted(TOOL_SCOPES)
+    schemas = {name: backend_schema(name) for name in tool_names}
     source = f"""#!{sys.executable}
 import anyio
+import json
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 TOOLS = {tool_names!r}
+SCHEMAS = json.loads({json.dumps(schemas)!r})
 server = Server("video-studio-http-e2e-backend")
 
 @server.list_tools()
 async def list_tools():
-    return [types.Tool(name=name, description=f"Fake {{name}}", inputSchema={{"type": "object", "additionalProperties": True}}) for name in TOOLS]
+    return [types.Tool(name=name, description=f"Fake {{name}}", inputSchema=SCHEMAS[name]) for name in TOOLS]
 
 @server.call_tool()
 async def call_tool(name, arguments):
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text="isolated-backend")],
+        content=[types.TextContent(type="text", text=json.dumps({{"tool": name, "arguments": arguments}}))],
         structuredContent={{"tool": name, "arguments": arguments}},
         _meta={{"backend": "isolated-keycloak-e2e"}},
     )
@@ -768,12 +758,13 @@ anyio.run(main)
     return executable
 
 
-def gateway_config(fixture: KeycloakFixture, root: Path, backend: Path) -> HttpMcpConfig:
-    workspace = root / "workspace"
+def gateway_config(
+    fixture: KeycloakFixture,
+    workspace: Path,
+    backend: Path,
+    media_tools_root: Path,
+) -> HttpMcpConfig:
     projects = workspace / "projects"
-    media_tools = root / "media-tools"
-    projects.mkdir(parents=True)
-    media_tools.mkdir()
     return HttpMcpConfig(
         host="127.0.0.1",
         port=8765,
@@ -786,13 +777,53 @@ def gateway_config(fixture: KeycloakFixture, root: Path, backend: Path) -> HttpM
         allowed_hosts=(urlparse(fixture.resource_url).netloc,),
         workspace_root=workspace.resolve(),
         projects_root=projects.resolve(),
-        media_tools_root=media_tools.resolve(),
+        media_tools_root=media_tools_root.resolve(strict=True),
         backend_command=backend.resolve(),
         jwks_cache_seconds=30,
         jwks_min_refresh_seconds=1,
         session_idle_timeout_seconds=60,
         max_sessions=8,
     )
+
+
+async def backend_tools(backend: Path, *, backend_home: Path | None = None) -> set[str]:
+    environment = get_default_environment()
+    if backend_home is not None:
+        environment["HOME"] = str(backend_home)
+    parameters = StdioServerParameters(
+        command=str(backend),
+        args=[],
+        env=environment,
+    )
+    with open(os.devnull, "w", encoding="utf-8") as diagnostics:
+        async with stdio_client(parameters, errlog=diagnostics) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return {tool.name for tool in (await session.list_tools()).tools}
+
+
+def isolated_candidate(context_path: Path) -> tuple[Path, Path, str, Path, Path, Path]:
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        home = Path(context["home"]).resolve(strict=True)
+        workspace = Path(context["workspace"]).resolve(strict=True)
+        project = Path(context["project"]).resolve(strict=True)
+        source = Path(context["source"]).resolve(strict=True)
+        qa_root = Path(context["qa"]).resolve(strict=True)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("isolated candidate context is invalid") from error
+    backend = home / ".local/share/video-studio/bin/video-studio-mcp"
+    if backend.is_symlink() or not backend.is_file() or not os.access(backend, os.X_OK):
+        raise RuntimeError("isolated candidate backend is not installed")
+    if project.parent != workspace / "projects":
+        raise RuntimeError("isolated candidate project is outside its workspace")
+    original = Path.home() / ".local/bin/video-studio-mcp"
+    try:
+        if original.exists() and backend.samefile(original):
+            raise RuntimeError("refusing to invoke the original Haru runtime")
+    except OSError as error:
+        raise RuntimeError("could not verify isolated backend identity") from error
+    return backend.resolve(), workspace, project.name, home, source, qa_root
 
 
 @contextlib.asynccontextmanager
@@ -825,6 +856,132 @@ async def raw_post(
                 "Origin": origin or resource_url.removesuffix("/mcp"),
             },
         )
+
+
+def structured_result(result: Any, operation: str) -> dict[str, Any]:
+    if result.isError or not isinstance(result.structuredContent, dict):
+        raise RuntimeError(f"{operation} returned an MCP error")
+    return result.structuredContent
+
+
+def nested_string(value: Any, key: str) -> str | None:
+    if isinstance(value, dict):
+        candidate = value.get(key)
+        if isinstance(candidate, str):
+            return candidate
+        for item in value.values():
+            found = nested_string(item, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = nested_string(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+async def render_and_export(session: ClientSession, project_id: str) -> None:
+    suffix = uuid.uuid4().hex[:12]
+    claim = structured_result(
+        await session.call_tool(
+            "lease_claim",
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "owner": "authenticated",
+                "ttl_seconds": 600,
+                "idempotency_key": f"http-e2e-claim-{suffix}",
+            },
+        ),
+        "lease_claim",
+    )
+    lease_id = nested_string(claim, "lease_id")
+    if lease_id is None:
+        raise RuntimeError("lease_claim omitted lease_id")
+
+    try:
+        started = structured_result(
+            await session.call_tool(
+                "run_next",
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "owner": "authenticated",
+                    "lease_id": lease_id,
+                    "runner": "render-project",
+                    "idempotency_key": f"http-e2e-render-{suffix}",
+                },
+            ),
+            "run_next render-project",
+        )
+        job_id = nested_string(started, "job_id")
+        if job_id is None or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise RuntimeError("render submission omitted canonical job_id")
+
+        deadline = time.monotonic() + 300
+        final_job: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            envelope = structured_result(
+                await session.call_tool(
+                    "job_status",
+                    {
+                        "schema_version": 1,
+                        "project_id": project_id,
+                        "job_id": job_id,
+                    },
+                ),
+                "job_status",
+            )
+            status = nested_string(envelope, "status")
+            if status == "succeeded":
+                final_job = envelope
+                break
+            if status in {"failed", "cancelled", "interrupted"}:
+                raise RuntimeError(f"render job reached terminal status {status}")
+            await asyncio.sleep(1)
+        if final_job is None:
+            raise RuntimeError("render job did not finish within 300 seconds")
+
+        delivery = structured_result(
+            await session.call_tool(
+                "delivery_status",
+                {"schema_version": 1, "project_id": project_id},
+            ),
+            "delivery_status",
+        )
+        if delivery.get("outcome") != "ok":
+            raise RuntimeError("delivery_status was not ready after successful render")
+        exported = structured_result(
+            await session.call_tool(
+                "export_delivery",
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "owner": "authenticated",
+                    "lease_id": lease_id,
+                    "idempotency_key": f"http-e2e-export-{suffix}",
+                    "diagnostic": False,
+                },
+            ),
+            "export_delivery",
+        )
+        if exported.get("outcome") != "ok":
+            raise RuntimeError("export_delivery did not complete")
+        print(f"PASS: authenticated render job {job_id} succeeded and exported")
+    finally:
+        released = await session.call_tool(
+            "lease_release",
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "owner": "authenticated",
+                "lease_id": lease_id,
+                "idempotency_key": f"http-e2e-release-{suffix}",
+            },
+        )
+        if released.isError:
+            raise RuntimeError("lease_release failed")
 
 
 async def authorization_code_token(
@@ -938,7 +1095,13 @@ async def authorization_code_token(
 
 
 async def exercise_gateway(
-    fixture: KeycloakFixture, config: HttpMcpConfig, ca_path: Path
+    fixture: KeycloakFixture,
+    config: HttpMcpConfig,
+    ca_path: Path,
+    *,
+    project_id: str,
+    fake_backend: bool,
+    render_project: bool,
 ) -> None:
     read_execute_token = await authorization_code_token(fixture, config, ca_path)
     review_only_token = fixture.token((REVIEW_SCOPE,))
@@ -953,12 +1116,15 @@ async def exercise_gateway(
     if not {READ_SCOPE, EXECUTE_SCOPE}.issubset(token_scopes):
         raise RuntimeError("Keycloak did not issue the requested Video Studio scopes")
 
-    project = config.projects_root / "e2e-project"
-    project.mkdir()
     async with sdk_session(config.resource_url, read_execute_token, ca_path) as session:
         tools = await session.list_tools()
         names = {tool.name for tool in tools.tools}
-        if "status" not in names or "lease_claim" not in names or "visual_qa" in names:
+        expected = {
+            name
+            for name, scope in TOOL_SCOPES.items()
+            if scope in {READ_SCOPE, EXECUTE_SCOPE}
+        }
+        if names != expected or "visual_qa" in names:
             raise RuntimeError("scope-filtered tool discovery was incorrect")
         if names.intersection(
             {
@@ -972,39 +1138,94 @@ async def exercise_gateway(
         ):
             raise RuntimeError("a publishing tool escaped onto the HTTP surface")
 
-        status = await session.call_tool(
-            "status", {"schema_version": 1, "project_root": str(project)}
-        )
+        workspace = await session.call_tool("workspace_info", {"schema_version": 1})
+        projects = await session.call_tool("project_list", {"schema_version": 1})
+        status = await session.call_tool("status", {"schema_version": 1, "project_id": project_id})
+        if workspace.isError or projects.isError:
+            raise RuntimeError("fixed-workspace catalog calls failed")
         if status.isError or status.structuredContent is None:
             raise RuntimeError("SDK status call through the stdio backend failed")
-        if status.structuredContent.get("tool") != "status":
-            raise RuntimeError("structured MCP result was not preserved")
-
-        lease = await session.call_tool(
-            "lease_claim",
-            {
-                "schema_version": 1,
-                "project_root": str(project),
-                "owner": "caller-impersonation-attempt",
-                "ttl_seconds": 60,
-                "idempotency_key": "keycloak-e2e-lease",
-            },
+        serialized = json.dumps(
+            [workspace.structuredContent, projects.structuredContent, status.structuredContent]
         )
-        forwarded_owner = (lease.structuredContent or {}).get("arguments", {}).get("owner")
-        if lease.isError or not str(forwarded_owner).startswith("http:"):
-            raise RuntimeError("authenticated principal was not bound to lease owner")
-        if forwarded_owner == "caller-impersonation-attempt":
-            raise RuntimeError("caller-selected lease owner reached the backend")
+        if str(config.workspace_root) in serialized:
+            raise RuntimeError("server workspace path leaked through HTTP")
+
+        if fake_backend:
+            lease = await session.call_tool(
+                "lease_claim",
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "owner": "caller-impersonation-attempt",
+                    "ttl_seconds": 60,
+                    "idempotency_key": "keycloak-e2e-lease",
+                },
+            )
+            forwarded_owner = (lease.structuredContent or {}).get("arguments", {}).get("owner")
+            if lease.isError or not str(forwarded_owner).startswith("http:"):
+                raise RuntimeError("authenticated principal was not bound to lease owner")
+            staged = await session.call_tool(
+                "artifact_stage",
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "owner": "ignored",
+                    "lease_id": "lease",
+                    "role": "script_notes",
+                    "inline_text": "Authenticated inline note",
+                    "idempotency_key": "keycloak-e2e-stage",
+                },
+            )
+            if staged.isError:
+                raise RuntimeError("public inline intake call failed")
+        if render_project:
+            if fake_backend:
+                raise RuntimeError("render mode requires an isolated installed backend")
+            await render_and_export(session, project_id)
 
     async with sdk_session(config.resource_url, review_only_token, ca_path) as session:
         names = {tool.name for tool in (await session.list_tools()).tools}
-        if names != {"visual_qa", "pronunciation_review", "review_resolve"}:
+        expected_review = {
+            name for name, scope in TOOL_SCOPES.items() if scope == REVIEW_SCOPE
+        }
+        if names != expected_review:
             raise RuntimeError("review-only token saw tools outside its scope")
         blocked = await session.call_tool(
-            "status", {"schema_version": 1, "project_root": str(project)}
+            "status", {"schema_version": 1, "project_id": project_id}
         )
         if not blocked.isError or "studio:read" not in blocked.content[0].text:
             raise RuntimeError("review-only token was not blocked from read tools")
+        render = await session.call_tool(
+            "run_next",
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "owner": "ignored",
+                "lease_id": "lease",
+                "runner": "render-project",
+                "idempotency_key": "forbidden-render",
+            },
+        )
+        if not render.isError or "studio:execute" not in render.content[0].text:
+            raise RuntimeError("review-only token could execute a renderer")
+        if fake_backend:
+            added = await session.call_tool(
+                "review_add",
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "client_id": "12345678-1234-4234-8234-123456789abc",
+                    "package_id": "a" * 64,
+                    "asset_id": "video-current",
+                    "asset_sha256": "b" * 64,
+                    "timestamp_seconds": 0,
+                    "body": "Authenticated review note",
+                    "idempotency_key": "keycloak-e2e-review",
+                },
+            )
+            if added.isError:
+                raise RuntimeError("review-scope comment call failed")
 
     wrong_audience = await raw_post(config.resource_url, wrong_audience_token, ca_path)
     if wrong_audience.status_code != 401:
@@ -1037,6 +1258,10 @@ async def run_tls_integration(
     ca_path: Path,
     certificate_directory: Path,
     tls_port: int,
+    *,
+    project_id: str,
+    fake_backend: bool,
+    render_project: bool,
 ) -> None:
     jwks_client = httpx.AsyncClient(
         verify=str(ca_path), trust_env=False, timeout=5.0, follow_redirects=False
@@ -1074,37 +1299,113 @@ async def run_tls_integration(
                             raise RuntimeError("TLS reverse proxy did not become ready")
                         await asyncio.sleep(0.2)
                 fixture.verify_discovery()
-                await exercise_gateway(fixture, config, ca_path)
+                await exercise_gateway(
+                    fixture,
+                    config,
+                    ca_path,
+                    project_id=project_id,
+                    fake_backend=fake_backend,
+                    render_project=render_project,
+                )
             finally:
                 await asyncio.to_thread(proxy.stop)
     finally:
         await jwks_client.aclose()
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run isolated Keycloak/TLS authentication against fake or installed MCP backend"
+    )
+    parser.add_argument(
+        "--context",
+        type=Path,
+        help="isolated E2E context JSON whose HOME contains an installed candidate",
+    )
+    parser.add_argument(
+        "--render-project",
+        metavar="PROJECT_ID",
+        help="submit/poll one real render and export; requires --context and a released project lease",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     tls_port = unused_loopback_port()
     callback_port = unused_loopback_port()
     resource_url = f"https://localhost:{tls_port}/mcp"
     redirect_uri = f"http://127.0.0.1:{callback_port}/callback"
-    print(f"Starting isolated {KEYCLOAK_IMAGE} authentication check", flush=True)
     with tempfile.TemporaryDirectory(prefix="video-studio-http-keycloak-") as temporary:
         root = Path(temporary)
         certificate_directory = root / "certificates"
         certificate_directory.mkdir()
         ca_path = write_test_certificates(certificate_directory)
+        if args.context is not None:
+            try:
+                backend, workspace, project_id, backend_home, source_root, qa_root = isolated_candidate(
+                    args.context.resolve(strict=True)
+                )
+                if args.render_project is not None and args.render_project != project_id:
+                    raise RuntimeError("--render-project must name the isolated context project")
+                os.environ["HOME"] = str(backend_home)
+                if args.render_project is not None:
+                    delivery_root = qa_root / "exports"
+                    if delivery_root.is_symlink():
+                        raise RuntimeError("isolated delivery root is a symlink")
+                    delivery_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    os.environ["VIDEO_STUDIO_DELIVERY_ROOT"] = str(delivery_root)
+                names = asyncio.run(backend_tools(backend, backend_home=backend_home))
+            except (RuntimeError, OSError, httpx.HTTPError) as error:
+                print(f"PENDING: isolated backend unavailable: {error}", file=sys.stderr)
+                return 2
+            missing = sorted(set(TOOL_SCOPES) - names)
+            if missing:
+                print(
+                    "PENDING: isolated backend missing required HTTP tools: "
+                    + ", ".join(missing),
+                    file=sys.stderr,
+                )
+                return 2
+            fake_backend = False
+            media_tools_root = source_root / "media-tools"
+        else:
+            if args.render_project is not None:
+                print("PENDING: --render-project requires --context", file=sys.stderr)
+                return 2
+            workspace = root / "workspace"
+            initialize_workspace(workspace)
+            project_id = "e2e-project"
+            (workspace / "projects" / project_id).mkdir()
+            backend = write_fake_backend(root)
+            fake_backend = True
+            media_tools_root = REPO_ROOT / "media-tools"
+        print(f"Starting isolated {KEYCLOAK_IMAGE} authentication check", flush=True)
         fixture = KeycloakFixture(resource_url, redirect_uri, ca_path)
         try:
             fixture.start()
-            backend = write_fake_backend(root)
-            config = gateway_config(fixture, root, backend)
+            config = gateway_config(
+                fixture, workspace, backend, media_tools_root
+            )
             asyncio.run(
                 run_tls_integration(
-                    fixture, config, ca_path, certificate_directory, tls_port
+                    fixture,
+                    config,
+                    ca_path,
+                    certificate_directory,
+                    tls_port,
+                    project_id=project_id,
+                    fake_backend=fake_backend,
+                    render_project=args.render_project is not None,
                 )
             )
             print("PASS: Keycloak authorization-code + PKCE S256 and exact callback checks")
             print("PASS: trusted-CA TLS reverse proxy and official SDK HTTP-to-stdio MCP")
             print("PASS: issuer, audience, scope, Origin, metadata, and principal binding checks")
+            print(
+                "PASS: "
+                + ("isolated installed core backend" if not fake_backend else "current fake backend contract")
+            )
             return 0
         except (RuntimeError, OSError, subprocess.SubprocessError, httpx.HTTPError) as error:
             print(f"FAIL: isolated Keycloak integration check: {error}", file=sys.stderr)

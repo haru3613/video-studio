@@ -25,8 +25,8 @@ class Presenter(NamedTuple):
 
 
 PROFILES = {
-    "mina_longform.v1": Presenter("mina", "mina_aroll", "Mina"),
-    "haru_tech.v1": Presenter("haru", "haru_aroll", "Haru"),
+    "host_longform.v1": Presenter("host", "host_aroll", "Host"),
+    "technical_host.v1": Presenter("technical_host", "technical_host_aroll", "Technical host"),
 }
 # Which presenter each lane is pinned to. `None` means the lane forbids one:
 # only a pinned lane is gated at render, so a lane that allowed a profile without
@@ -35,15 +35,15 @@ PROFILES = {
 # render_project_worker gates render on it, and agent_status is cross-checked
 # against it by test. Three copies of it is how they drift apart.
 LANE_PROFILES = {
-    "social_issue_longform.v1": "mina_longform.v1",
-    "tech_longform.v1": "haru_tech.v1",
+    "social_issue_longform.v1": "host_longform.v1",
+    "tech_longform.v1": "technical_host.v1",
     "manual.v1": None,
 }
 
 # Presenter assumed when a contract declares no usable profile: the fallback that
 # lets validate_project report every other fault in one pass, the profile pinned to
 # the social lane, and the default for callers scaffolding a new project.
-PROFILE = "mina_longform.v1"
+PROFILE = "host_longform.v1"
 COMPOSITIONS = {"aroll_full", "broll_full", "broll_pip", "motion_graphics"}
 AROLL_MIN = 0.15
 AROLL_MAX = 0.20

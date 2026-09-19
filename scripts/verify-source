@@ -24,7 +24,7 @@ for source in tools/dashboard/*.js; do node --check "$source"; done
 "$CARGO_BIN" fmt --manifest-path pipeline/Cargo.toml --check
 "$CARGO_BIN" clippy --locked --manifest-path pipeline/Cargo.toml --all-targets -- -D warnings
 "$CARGO_BIN" test --locked --manifest-path pipeline/Cargo.toml
-uv run --locked pytest -q tools tests media-tools/tests
+uv run --locked pytest -q tools tests media-tools
 if [[ "$(uname -s)" == Darwin ]]; then
   /usr/bin/swift test --package-path native/publish-approval
 else

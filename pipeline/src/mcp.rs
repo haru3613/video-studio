@@ -1,4 +1,7 @@
 use std::fs::{self, OpenOptions};
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -14,10 +17,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::application::{
-    self, AppResult, ApprovePublishRequest, ExportDeliveryRequest, JobMutationRequest, LeaseInput,
-    PreparePublishApprovalRequest, ProcessExecutor, ProduceArtifactRequest,
-    PronunciationReviewRequest, ReplaceThumbnailRequest, ReviewResolutionRequest, RunNextRequest,
-    SelfEvalFinding, SelfEvalReviewInput, VisualQaRequest,
+    self, AppResult, ApprovePublishRequest, ArtifactImportRequest, ArtifactStageRequest,
+    ExportDeliveryRequest, JobMutationRequest, LeaseInput, PreparePublishApprovalRequest,
+    ProcessExecutor, ProduceArtifactRequest, ProduceStagedArtifactRequest,
+    PronunciationReviewRequest, ReplaceThumbnailRequest, ReviewAddRequest, ReviewResolutionRequest,
+    RunNextRequest, SelfEvalFinding, SelfEvalReviewInput, VisualQaRequest,
 };
 use crate::lease_authority::LeaseAuthority;
 use crate::runtime::{RuntimeAuthority, RuntimeBinding, ToolSurface};
@@ -45,6 +49,13 @@ pub struct SelectInput {
 pub struct ProjectInput {
     pub schema_version: u32,
     pub project_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceInput {
+    pub schema_version: u32,
+    pub workspace_root: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +118,46 @@ pub struct ExportDeliveryInput {
     pub owner: String,
     pub lease_id: String,
     pub idempotency_key: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub diagnostic: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactStageInput {
+    pub schema_version: u32,
+    pub project_root: String,
+    pub owner: String,
+    pub lease_id: String,
+    pub role: String,
+    pub inbox_path: Option<String>,
+    pub inline_text: Option<String>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactImportInput {
+    pub schema_version: u32,
+    pub project_root: String,
+    pub owner: String,
+    pub lease_id: String,
+    pub stage_id: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProduceStagedArtifactInput {
+    pub schema_version: u32,
+    pub project_root: String,
+    pub owner: String,
+    pub lease_id: String,
+    pub stage_id: String,
+    pub artifact: String,
+    pub produced_by: String,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -142,12 +193,24 @@ pub struct JobMutationInput {
 pub struct ReviewResolveInput {
     pub schema_version: u32,
     pub project_root: String,
-    pub owner: String,
-    pub lease_id: String,
     pub comment_id: String,
     pub status: String,
     pub expected_package_id: String,
     pub expected_asset_sha256: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewAddInput {
+    pub schema_version: u32,
+    pub project_root: String,
+    pub client_id: String,
+    pub package_id: String,
+    pub asset_id: String,
+    pub asset_sha256: String,
+    pub timestamp_seconds: Option<f64>,
+    pub body: String,
     pub idempotency_key: String,
 }
 
@@ -502,6 +565,33 @@ impl HvpService {
     }
 
     #[tool(
+        name = "workspace_info",
+        description = "Read initialized workspace identity and project count."
+    )]
+    async fn workspace_info(
+        &self,
+        Parameters(input): Parameters<WorkspaceInput>,
+    ) -> Json<AppResult> {
+        if input.schema_version != 1 {
+            return self.refuse(AppResult::invalid_input());
+        }
+        self.blocking(move || application::workspace_info(Path::new(&input.workspace_root)))
+            .await
+    }
+
+    #[tool(
+        name = "project_list",
+        description = "List direct projects in an initialized workspace without exposing artifact paths."
+    )]
+    async fn project_list(&self, Parameters(input): Parameters<WorkspaceInput>) -> Json<AppResult> {
+        if input.schema_version != 1 {
+            return self.refuse(AppResult::invalid_input());
+        }
+        self.blocking(move || application::project_list(Path::new(&input.workspace_root)))
+            .await
+    }
+
+    #[tool(
         name = "status",
         description = "Read canonical project state and blockers."
     )]
@@ -589,6 +679,7 @@ impl HvpService {
                             project_root: project.clone(),
                             lease: lease.clone(),
                             idempotency_key: input.idempotency_key.clone(),
+                            diagnostic: input.diagnostic,
                         },
                         &repo_root,
                         &mut ProcessExecutor,
@@ -657,6 +748,44 @@ impl HvpService {
     }
 
     #[tool(
+        name = "review_add",
+        description = "Add one digest-bound local review comment without creating formal approval."
+    )]
+    async fn review_add(&self, Parameters(input): Parameters<ReviewAddInput>) -> Json<AppResult> {
+        if let Some(blocked) = self.gate(input.schema_version, &input.project_root, true) {
+            return self.refuse(blocked);
+        }
+        let repo_root = self.repo_root.clone();
+        let binding = self.runtime.binding();
+        self.blocking_mutation(input.project_root.clone(), move || {
+            let project = PathBuf::from(&input.project_root);
+            run_idempotent(
+                &binding,
+                &project,
+                &input.idempotency_key,
+                "review_add",
+                &input,
+                || {
+                    application::review_add(
+                        &ReviewAddRequest {
+                            project_root: project.clone(),
+                            client_id: input.client_id.clone(),
+                            package_id: input.package_id.clone(),
+                            asset_id: input.asset_id.clone(),
+                            asset_sha256: input.asset_sha256.clone(),
+                            timestamp_seconds: input.timestamp_seconds,
+                            body: input.body.clone(),
+                        },
+                        &repo_root,
+                        &mut ProcessExecutor,
+                    )
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
         name = "review_feedback",
         description = "Read current local review comments without treating feedback as formal approval."
     )]
@@ -680,11 +809,50 @@ impl HvpService {
 
     #[tool(
         name = "review_resolve",
-        description = "Resolve or reopen one digest-bound local review comment under the active project lease."
+        description = "Resolve or reopen one digest-bound local review comment under the workspace review lock."
     )]
     async fn review_resolve(
         &self,
         Parameters(input): Parameters<ReviewResolveInput>,
+    ) -> Json<AppResult> {
+        if let Some(blocked) = self.gate(input.schema_version, &input.project_root, true) {
+            return self.refuse(blocked);
+        }
+        let repo_root = self.repo_root.clone();
+        let binding = self.runtime.binding();
+        self.blocking_mutation(input.project_root.clone(), move || {
+            let project = PathBuf::from(&input.project_root);
+            run_idempotent(
+                &binding,
+                &project,
+                &input.idempotency_key,
+                "review_resolve",
+                &input,
+                || {
+                    application::review_resolve(
+                        &ReviewResolutionRequest {
+                            project_root: project.clone(),
+                            comment_id: input.comment_id.clone(),
+                            status: input.status.clone(),
+                            expected_package_id: input.expected_package_id.clone(),
+                            expected_asset_sha256: input.expected_asset_sha256.clone(),
+                        },
+                        &repo_root,
+                        &mut ProcessExecutor,
+                    )
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        name = "artifact_stage",
+        description = "Stage one bounded workspace inbox file or inline text blob for a typed project role."
+    )]
+    async fn artifact_stage(
+        &self,
+        Parameters(input): Parameters<ArtifactStageInput>,
     ) -> Json<AppResult> {
         if let Some(blocked) = self.gate(input.schema_version, &input.project_root, true) {
             return self.refuse(blocked);
@@ -702,17 +870,102 @@ impl HvpService {
                 &binding,
                 &project,
                 &input.idempotency_key,
-                "review_resolve",
+                "artifact_stage",
                 &input,
                 || {
-                    application::review_resolve(
-                        &ReviewResolutionRequest {
+                    application::artifact_stage(
+                        &ArtifactStageRequest {
                             project_root: project.clone(),
                             lease: lease.clone(),
-                            comment_id: input.comment_id.clone(),
-                            status: input.status.clone(),
-                            expected_package_id: input.expected_package_id.clone(),
-                            expected_asset_sha256: input.expected_asset_sha256.clone(),
+                            role: input.role.clone(),
+                            inbox_path: input.inbox_path.clone(),
+                            inline_text: input.inline_text.clone(),
+                        },
+                        &repo_root,
+                        &mut ProcessExecutor,
+                    )
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        name = "artifact_import",
+        description = "Import one verified staged blob into its non-canonical project imports namespace."
+    )]
+    async fn artifact_import(
+        &self,
+        Parameters(input): Parameters<ArtifactImportInput>,
+    ) -> Json<AppResult> {
+        if let Some(blocked) = self.gate(input.schema_version, &input.project_root, true) {
+            return self.refuse(blocked);
+        }
+        let project = PathBuf::from(&input.project_root);
+        let lease = match self.lease_input(&project, &input.owner, &input.lease_id) {
+            Ok(lease) => lease,
+            Err(blocked) => return self.refuse(*blocked),
+        };
+        let repo_root = self.repo_root.clone();
+        let binding = self.runtime.binding();
+        self.blocking_mutation(input.project_root.clone(), move || {
+            let project = PathBuf::from(&input.project_root);
+            run_idempotent(
+                &binding,
+                &project,
+                &input.idempotency_key,
+                "artifact_import",
+                &input,
+                || {
+                    application::artifact_import(
+                        &ArtifactImportRequest {
+                            project_root: project.clone(),
+                            lease: lease.clone(),
+                            stage_id: input.stage_id.clone(),
+                        },
+                        &repo_root,
+                        &mut ProcessExecutor,
+                    )
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        name = "produce_staged_artifact",
+        description = "Promote a verified staged text or JSON blob into an explicitly allowlisted agent-authorable artifact."
+    )]
+    async fn produce_staged_artifact(
+        &self,
+        Parameters(input): Parameters<ProduceStagedArtifactInput>,
+    ) -> Json<AppResult> {
+        if let Some(blocked) = self.gate(input.schema_version, &input.project_root, true) {
+            return self.refuse(blocked);
+        }
+        let project = PathBuf::from(&input.project_root);
+        let lease = match self.lease_input(&project, &input.owner, &input.lease_id) {
+            Ok(lease) => lease,
+            Err(blocked) => return self.refuse(*blocked),
+        };
+        let repo_root = self.repo_root.clone();
+        let binding = self.runtime.binding();
+        self.blocking_mutation(input.project_root.clone(), move || {
+            let project = PathBuf::from(&input.project_root);
+            run_idempotent(
+                &binding,
+                &project,
+                &input.idempotency_key,
+                "produce_staged_artifact",
+                &input,
+                || {
+                    application::produce_staged_artifact(
+                        &ProduceStagedArtifactRequest {
+                            project_root: project.clone(),
+                            lease: lease.clone(),
+                            stage_id: input.stage_id.clone(),
+                            artifact: input.artifact.clone(),
+                            produced_by: input.produced_by.clone(),
                         },
                         &repo_root,
                         &mut ProcessExecutor,
@@ -1152,7 +1405,7 @@ impl HvpService {
 
     #[tool(
         name = "approve_publish",
-        description = "Record Harvey's digest-bound approval for the current final video."
+        description = "Record the operator's digest-bound approval for the current final video."
     )]
     async fn approve_publish(
         &self,
@@ -1410,6 +1663,16 @@ impl HvpService {
         let runtime = self.runtime.clone();
         let result = tokio::task::spawn_blocking(move || {
             let project = PathBuf::from(project_root);
+            let _workspace_guard = match workspace_mutation_guard(&project) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    return runtime.stamp(AppResult::blocked_with_data(
+                        "workspace_barrier_unavailable",
+                        &project,
+                        Some(serde_json::json!({"detail": error.to_string()})),
+                    ));
+                }
+            };
             let _guard = match runtime.mutation_guard(&project) {
                 Ok(guard) => guard,
                 Err(blocked) => return runtime.stamp(*blocked),
@@ -1420,6 +1683,86 @@ impl HvpService {
         .unwrap_or_else(|_| self.runtime.stamp(AppResult::internal_error(None)));
         Json(result)
     }
+}
+
+fn workspace_mutation_guard(path: &Path) -> io::Result<Option<fs::File>> {
+    let canonical = path.canonicalize()?;
+    let workspace = if canonical.file_name().and_then(|name| name.to_str()) == Some("projects") {
+        canonical.parent().map(Path::to_path_buf)
+    } else if canonical
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("projects")
+    {
+        canonical
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    } else {
+        None
+    };
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    let manifest = workspace.join("workspace.json");
+    match fs::symlink_metadata(&manifest) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace manifest is unsafe",
+            ));
+        }
+        Ok(_) => {}
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest)?).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("workspace manifest: {error}"),
+            )
+        })?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("video_studio.workspace.v1")
+        || value
+            .get("workspace_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace manifest is invalid",
+        ));
+    }
+    let state = workspace.join(".video-studio");
+    let metadata = fs::symlink_metadata(&state)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace private state is unsafe",
+        ));
+    }
+    let lock_path = state.join("workspace-barrier.lock");
+    if fs::symlink_metadata(&lock_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace barrier is unsafe",
+        ));
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))?;
+    lock.lock_shared()?;
+    Ok(Some(lock))
 }
 
 /// Execute one keyed mutation at most once, and hand a duplicate call the

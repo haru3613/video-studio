@@ -6,10 +6,17 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, TypeVar
+
+try:
+    from workspace_barrier import mutation_barrier
+except ImportError:  # review server also runs with tools/dashboard as sys.path[0]
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from workspace_barrier import mutation_barrier
 
 
 STORE_SCHEMA = "haru.review_feedback.v1"
@@ -41,6 +48,7 @@ class ReviewStore:
 
     def __init__(self, project_root: Path, storage_root: Path | None = None):
         canonical = project_root.resolve(strict=True)
+        self.project_root = canonical
         base = storage_root or (
             Path.home() / ".local" / "state" / "video-studio" / "review-hub"
         )
@@ -114,16 +122,20 @@ class ReviewStore:
             return json.loads(json.dumps(document["comments"]))
 
     def update(self, mutator: Callable[[list[dict]], T]) -> T:
-        with self._locked(exclusive=True):
-            document = self._read_unlocked()
-            result = mutator(document["comments"])
-            self._write_unlocked(document)
-            return result
+        with mutation_barrier(self.project_root):
+            with self._locked(exclusive=True):
+                document = self._read_unlocked()
+                result = mutator(document["comments"])
+                self._write_unlocked(document)
+                return result
 
     def _write_unlocked(self, document: dict) -> None:
-        payload = json.dumps(
-            document, ensure_ascii=False, indent=2, sort_keys=True
-        ).encode("utf-8") + b"\n"
+        payload = (
+            json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True).encode(
+                "utf-8"
+            )
+            + b"\n"
+        )
         fd, temporary_name = tempfile.mkstemp(
             prefix=".feedback.", suffix=".tmp", dir=self.directory
         )

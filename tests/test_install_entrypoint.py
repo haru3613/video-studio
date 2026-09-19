@@ -26,7 +26,12 @@ def installation_fixture(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     capture = tmp_path / "capture.json"
-    env = {**os.environ, "HOME": str(home), "TEST_INSTALL_CAPTURE": str(capture), "HVP_RUNTIME_STATE": str(tmp_path / "unrelated-runtime"), "HVP_LAUNCHER_PATH": str(tmp_path / "unrelated-launcher")}
+    helpers = tmp_path / "helpers"
+    helpers.mkdir()
+    fake_uv = helpers / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 0\n")
+    fake_uv.chmod(0o755)
+    env = {**os.environ, "HOME": str(home), "PATH": str(helpers) + os.pathsep + os.environ["PATH"], "TEST_INSTALL_CAPTURE": str(capture), "HVP_RUNTIME_STATE": str(tmp_path / "unrelated-runtime"), "HVP_LAUNCHER_PATH": str(tmp_path / "unrelated-launcher")}
     return source, home, capture, env
 
 

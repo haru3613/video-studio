@@ -1329,7 +1329,7 @@ def promote_narration(project_path: Path) -> dict:
     # for the gates -- and a take that failed the truncation gate leaves a
     # plausible-looking MP3 on disk with no receipt, so "repair the missing
     # receipt" is the natural next move for a confused agent, not a contrived
-    # one. This is the line between "the audio Harvey accepted" and "audio".
+    # one. This is the line between "the audio the operator accepted" and "audio".
     probe, probe_sha, plan_sha, source_sha = current_probe(project)
     review_path = direct_file(state / "pronunciation-review.json")
     review = read_json(review_path)

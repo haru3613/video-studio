@@ -15,8 +15,13 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from workspace_barrier import mutation_barrier
 
 
 SCHEMA = "video-studio.template_trust.v1"
@@ -75,7 +80,9 @@ def _relative_remotion(project: Path, remotion: Path) -> str:
 
 def remotion_from_plan(project_value: Path) -> Path | None:
     project = _direct_directory(project_value)
-    plan = json.loads(_direct_file(project / "render_plan.json").read_text(encoding="utf-8"))
+    plan = json.loads(
+        _direct_file(project / "render_plan.json").read_text(encoding="utf-8")
+    )
     relative = plan.get("remotion_dir")
     if relative is None:
         return None
@@ -151,14 +158,19 @@ def code_manifest(remotion_value: Path) -> list[dict]:
         raise TrustError("dependency lock required")
     if not CONFIGS.intersection(present):
         raise TrustError("Remotion config required")
-    if not any(entry["path"].endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")) for entry in entries):
+    if not any(
+        entry["path"].endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))
+        for entry in entries
+    ):
         raise TrustError("template code required")
     return entries
 
 
 def code_digest(remotion_value: Path) -> tuple[str, list[dict]]:
     manifest = code_manifest(remotion_value)
-    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}", manifest
 
 
@@ -253,7 +265,7 @@ def _atomic_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def trust(project_value: Path) -> dict:
+def _trust_unlocked(project_value: Path) -> dict:
     project = _owner_directory(project_value)
     remotion = remotion_from_plan(project)
     if remotion is None:
@@ -280,6 +292,11 @@ def trust(project_value: Path) -> dict:
     ] + [entry]
     _atomic_json(project / LEDGER, ledger)
     return authorize(project)
+
+
+def trust(project_value: Path) -> dict:
+    with mutation_barrier(project_value):
+        return _trust_unlocked(project_value)
 
 
 def copy_authority(source_project_value: Path, snapshot_project_value: Path) -> None:

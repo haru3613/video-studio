@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import render_project
+import render_contract
 import template_trust
 
 
@@ -77,6 +78,9 @@ class RenderLifecycleTest(unittest.TestCase):
         marker = {
             "schema": "haru.render_result.v1",
             "status": "render_complete",
+            "render_input_revision": render_contract.render_input_revision(
+                self.project
+            ),
             "project": self.project.name,
             "output": "output/final.mp4",
             "video_sha256": digest,
@@ -97,9 +101,7 @@ class RenderLifecycleTest(unittest.TestCase):
                 },
             },
         }
-        (self.project / "output/final.mp4.render-result").write_text(
-            json.dumps(marker)
-        )
+        (self.project / "output/final.mp4.render-result").write_text(json.dumps(marker))
 
         resumed, resumed_exit = render_project.run(self.project, self.tools)
 
@@ -269,6 +271,7 @@ class SupersededRenderTest(unittest.TestCase):
         marker = {
             "schema": "haru.render_result.v1",
             "status": "render_complete",
+            "render_input_revision": render_contract.render_input_revision(project),
             "project": "demo",
             "output": "output/final.mp4",
             "video_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
@@ -283,15 +286,21 @@ class SupersededRenderTest(unittest.TestCase):
                 "method": "ffmpeg_loudnorm_two_pass",
                 "normalization_type": "dynamic",
                 "input_sha256": "a" * 64,
-                "target": {"integrated_lufs": -14.0, "true_peak_dbfs": -1.0,
-                           "loudness_range_lu": 3.8},
+                "target": {
+                    "integrated_lufs": -14.0,
+                    "true_peak_dbfs": -1.0,
+                    "loudness_range_lu": 3.8,
+                },
             },
         }
         (project / "output/final.mp4.render-result").write_text(
-            json.dumps(marker), encoding="utf-8")
+            json.dumps(marker), encoding="utf-8"
+        )
         # The previous run's byproducts, which the worker also refuses to start
         # on top of.
-        (project / "output/final.mp4.render.log").write_text("previous log", encoding="utf-8")
+        (project / "output/final.mp4.render.log").write_text(
+            "previous log", encoding="utf-8"
+        )
         (project / "output/final.pre-loudnorm.mp4").write_bytes(b"premix")
         return project, narration, marker
 
@@ -300,8 +309,9 @@ class SupersededRenderTest(unittest.TestCase):
             project, narration, marker = self._project(tmp)
             narration.write_bytes(b"the take approved after it")
 
-            with mock.patch.object(render_project, "start_job",
-                                   return_value={"label": "job"}) as start:
+            with mock.patch.object(
+                render_project, "start_job", return_value={"label": "job"}
+            ) as start:
                 payload, code = render_project.run(str(project), str(project))
 
             self.assertEqual(code, 0)
@@ -334,7 +344,8 @@ class SupersededRenderTest(unittest.TestCase):
             project, _, marker = self._project(tmp)
             del marker["mix"]
             (project / "output/final.mp4.render-result").write_text(
-                json.dumps(marker), encoding="utf-8")
+                json.dumps(marker), encoding="utf-8"
+            )
 
             with mock.patch.object(render_project, "start_job") as start:
                 payload, code = render_project.run(str(project), str(project))

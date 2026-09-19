@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -21,7 +23,7 @@ import time
 import tomllib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -40,6 +42,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.routing import Route
 
+try:
+    from . import artifact_intake
+except ImportError:  # direct script execution
+    import artifact_intake
+
 
 READ_SCOPE = "studio:read"
 EXECUTE_SCOPE = "studio:execute"
@@ -49,6 +56,8 @@ ALL_SCOPES = (READ_SCOPE, EXECUTE_SCOPE, REVIEW_SCOPE)
 # This allowlist is deliberately closed.  Publish, upload, thumbnail replacement,
 # publish approval, and runtime trust operations never enter the HTTP surface.
 TOOL_SCOPES: dict[str, str] = {
+    "workspace_info": READ_SCOPE,
+    "project_list": READ_SCOPE,
     "create": EXECUTE_SCOPE,
     "select": READ_SCOPE,
     "status": READ_SCOPE,
@@ -67,10 +76,13 @@ TOOL_SCOPES: dict[str, str] = {
     "job_cancel": EXECUTE_SCOPE,
     "job_resume": EXECUTE_SCOPE,
     "review_feedback": READ_SCOPE,
+    "review_add": REVIEW_SCOPE,
     "review_resolve": REVIEW_SCOPE,
+    "artifact_stage": EXECUTE_SCOPE,
+    "artifact_import": EXECUTE_SCOPE,
+    "produce_staged_artifact": EXECUTE_SCOPE,
     "visual_qa": REVIEW_SCOPE,
     "pronunciation_review": REVIEW_SCOPE,
-    "produce_artifact": EXECUTE_SCOPE,
 }
 
 PUBLISHING_TOOLS = frozenset(
@@ -104,6 +116,7 @@ BACKEND_ENV_ALLOWLIST = (
     "VIDEO_STUDIO_TTS_VOICE_ID",
     "VIDEO_STUDIO_TTS_MODEL",
     "VIDEO_STUDIO_TTS_MAX_CREDITS",
+    "VIDEO_STUDIO_TTS_SPEND_JOURNAL",
     "VIDEO_STUDIO_TTS_PYTHON",
     "HARU_TTS_PYTHON",
     "VIDEO_STUDIO_G2PW_PYTHON",
@@ -138,6 +151,25 @@ _COMMENT_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STAGE_ID = re.compile(r"^[0-9a-f]{32}$")
+_PUBLIC_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+INLINE_TEXT_LIMIT = 1024 * 1024
+STAGED_PRODUCE_TARGETS = frozenset(
+    {
+        "script-proposal.md",
+        "sources.md",
+        "issue_brief.md",
+        "storyboard-final-timed.json",
+        "editorial-contract.json",
+        "claims.json",
+        "publish-metadata.json",
+    }
+)
+NO_PROJECT_TOOLS = frozenset({"workspace_info", "project_list"})
+ROOT_ARGUMENTS = frozenset(
+    {"workspace_root", "projects_root", "project_root", "tools_root", "source_file"}
+)
 
 
 class ConfigurationError(ValueError):
@@ -168,7 +200,7 @@ class HttpMcpConfig:
     jwks_max_keys: int = 32
     jwks_max_bytes: int = 262_144
     clock_skew_seconds: int = 30
-    max_request_body_size: int = 1_048_576
+    max_request_body_size: int = 2_097_152
     session_idle_timeout_seconds: int = 900
     max_sessions: int = 100
 
@@ -185,6 +217,7 @@ class BackendSession(Protocol):
 class GatewaySession:
     backend: BackendSession
     tools: dict[str, types.Tool]
+    public_tools: dict[str, types.Tool]
 
 
 BackendConnector = Callable[[HttpMcpConfig], contextlib.AbstractAsyncContextManager[BackendSession]]
@@ -342,6 +375,21 @@ def load_config(path: Path, *, repo_root: Path | None = None) -> HttpMcpConfig:
 
     workspace_root = _configured_directory(_require_string(paths, "workspace_root"), "workspace_root")
     projects_root = _configured_directory(str(workspace_root / "projects"), "workspace projects directory")
+    _configured_directory(str(workspace_root / "inbox"), "workspace inbox directory")
+    _configured_directory(str(workspace_root / ".video-studio"), "workspace state directory")
+    manifest_path = workspace_root / "workspace.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ConfigurationError("workspace_root must contain a direct workspace.json")
+    try:
+        workspace_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ConfigurationError("workspace.json is not valid UTF-8 JSON") from error
+    if not isinstance(workspace_manifest, dict) or workspace_manifest.get("schema") != "video_studio.workspace.v1":
+        raise ConfigurationError("workspace.json has an unsupported schema")
+    try:
+        artifact_intake.workspace_info(workspace_root)
+    except (artifact_intake.IntakeError, OSError, TypeError, ValueError) as error:
+        raise ConfigurationError("workspace_root is not a valid Video Studio workspace") from error
 
     root = (repo_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
     media_tools_root = _configured_directory(str(root / "media-tools"), "bundled media-tools root")
@@ -374,7 +422,7 @@ def load_config(path: Path, *, repo_root: Path | None = None) -> HttpMcpConfig:
         jwks_max_bytes=_require_int(oauth, "jwks_max_bytes", 262_144, 4_096, 1_048_576),
         clock_skew_seconds=_require_int(oauth, "clock_skew_seconds", 30, 0, 300),
         max_request_body_size=_require_int(
-            server, "max_request_body_size", 1_048_576, 16_384, 4_194_304
+            server, "max_request_body_size", 2_097_152, 16_384, 4_194_304
         ),
         session_idle_timeout_seconds=_require_int(
             server, "session_idle_timeout_seconds", 900, 30, 86_400
@@ -557,6 +605,14 @@ def _principal_owner(token: AccessToken) -> str:
     return f"http:{digest[:40]}"
 
 
+def _principal_idempotency_key(token: AccessToken, value: object) -> str:
+    if not isinstance(value, str) or not _IDEMPOTENCY_KEY.fullmatch(value):
+        raise GatewayPolicyError("idempotency_key must be a bounded opaque identifier")
+    principal = _principal_owner(token).removeprefix("http:")
+    key_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:40]
+    return f"http_{principal}_{key_digest}"
+
+
 def _require_no_symlink_components(root: Path, path: Path) -> None:
     try:
         relative = path.relative_to(root)
@@ -588,6 +644,16 @@ def _project_path(value: object, config: HttpMcpConfig) -> Path:
     if not resolved.is_dir() or resolved.parent != config.projects_root:
         raise GatewayPolicyError("project_root must be a direct child of the configured projects root")
     return resolved
+
+
+def _project_id_path(value: object, config: HttpMcpConfig) -> Path:
+    if not isinstance(value, str) or not _SLUG.fullmatch(value):
+        raise GatewayPolicyError("project_id must be a canonical lowercase slug")
+    try:
+        project = artifact_intake.resolve_project(config.workspace_root, value)
+    except (artifact_intake.IntakeError, OSError, TypeError, ValueError) as error:
+        raise GatewayPolicyError("project_id does not name a direct workspace project") from error
+    return _project_path(str(project), config)
 
 
 def _projects_path(value: object, config: HttpMcpConfig) -> Path:
@@ -629,6 +695,115 @@ def _safe_artifact(value: object) -> str:
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise GatewayPolicyError("artifact must be a safe project-relative path")
     return value
+
+
+def _safe_inbox_reference(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or "\\" in value
+        or "\x00" in value
+    ):
+        raise GatewayPolicyError("inbox_path must be a bounded relative path")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise GatewayPolicyError("inbox_path must be a bounded relative path")
+    return value
+
+
+def _public_input_schema(name: str, backend_schema: dict[str, Any]) -> dict[str, Any]:
+    """Project the stdio schema into the fixed-workspace HTTP contract."""
+
+    schema = copy.deepcopy(backend_schema)
+    properties = schema.setdefault("properties", {})
+    required = list(schema.get("required", []))
+
+    project_schema = properties.pop("project_root", None)
+    for field in ROOT_ARGUMENTS:
+        properties.pop(field, None)
+        required = [item for item in required if item != field]
+
+    if name in {"create", "select"}:
+        properties.pop("project", None)
+        required = [item for item in required if item != "project"]
+        project_schema = {"type": "string"}
+
+    if name not in NO_PROJECT_TOOLS:
+        public_project = copy.deepcopy(project_schema or {"type": "string"})
+        public_project.update(
+            {
+                "type": "string",
+                "pattern": _SLUG.pattern,
+                "description": "Project identifier in the server's configured workspace.",
+            }
+        )
+        properties["project_id"] = public_project
+        if "project_id" not in required:
+            required.append("project_id")
+
+    if name == "artifact_stage":
+        properties.setdefault("inbox_path", {"type": ["string", "null"]})
+        properties.setdefault("inline_text", {"type": ["string", "null"]})
+        properties["inbox_path"].update({"maxLength": 1024})
+        properties["inline_text"].update({"maxLength": INLINE_TEXT_LIMIT})
+        schema["oneOf"] = [
+            {"required": ["inbox_path"], "not": {"required": ["inline_text"]}},
+            {"required": ["inline_text"], "not": {"required": ["inbox_path"]}},
+        ]
+    if name in {"artifact_import", "produce_staged_artifact"}:
+        properties.setdefault("stage_id", {"type": "string"})
+        properties["stage_id"].update({"pattern": _STAGE_ID.pattern})
+
+    schema["required"] = required
+    schema["properties"] = properties
+    schema["additionalProperties"] = False
+    return schema
+
+
+def _public_tool(name: str, tool: types.Tool, scope: str) -> types.Tool:
+    description = (tool.description or "").rstrip()
+    return tool.model_copy(
+        update={
+            "description": f"{description} Requires OAuth scope `{scope}`.",
+            "inputSchema": _public_input_schema(name, tool.inputSchema),
+        }
+    )
+
+
+def _backend_arguments(
+    name: str,
+    arguments: dict[str, Any],
+    config: HttpMcpConfig,
+) -> dict[str, Any]:
+    if any(field in arguments for field in ROOT_ARGUMENTS):
+        raise GatewayPolicyError("server filesystem roots are not accepted over HTTP")
+    converted = dict(arguments)
+    project_id = converted.pop("project_id", None)
+    if name in NO_PROJECT_TOOLS:
+        if project_id is not None:
+            raise GatewayPolicyError("this tool does not accept project_id")
+        converted["workspace_root"] = str(config.workspace_root)
+        return converted
+
+    if name == "create":
+        if not isinstance(project_id, str) or not _SLUG.fullmatch(project_id):
+            raise GatewayPolicyError("project_id must be a canonical lowercase slug")
+        converted["projects_root"] = str(config.projects_root)
+        converted["project"] = project_id
+        return converted
+    if name == "select":
+        project = _project_id_path(project_id, config)
+        converted["projects_root"] = str(config.projects_root)
+        converted["project"] = project.name
+        return converted
+
+    converted["project_root"] = str(_project_id_path(project_id, config))
+    return converted
 
 
 def enforce_arguments(
@@ -711,8 +886,149 @@ def enforce_arguments(
             raise GatewayPolicyError("expected_asset_sha256 must be a lowercase SHA-256 digest")
         if constrained.get("status") not in {"open", "resolved"}:
             raise GatewayPolicyError("review status must be open or resolved")
+        constrained["idempotency_key"] = _principal_idempotency_key(
+            token, constrained.get("idempotency_key")
+        )
+
+    if tool_name == "review_add":
+        client_id = constrained.get("client_id")
+        package_id = constrained.get("package_id")
+        asset_id = constrained.get("asset_id")
+        asset_sha256 = constrained.get("asset_sha256")
+        body = constrained.get("body")
+        timestamp = constrained.get("timestamp_seconds")
+        if not isinstance(client_id, str) or not _COMMENT_ID.fullmatch(client_id):
+            raise GatewayPolicyError("client_id must be a canonical lowercase UUID")
+        if not isinstance(package_id, str) or not _SHA256.fullmatch(package_id):
+            raise GatewayPolicyError("package_id must be a lowercase SHA-256 digest")
+        if not isinstance(asset_id, str) or not _PUBLIC_IDENTIFIER.fullmatch(asset_id):
+            raise GatewayPolicyError("asset_id must be a bounded identifier")
+        if not isinstance(asset_sha256, str) or not _SHA256.fullmatch(asset_sha256):
+            raise GatewayPolicyError("asset_sha256 must be a lowercase SHA-256 digest")
+        if not isinstance(body, str) or not body.strip() or len(body) > 5000:
+            raise GatewayPolicyError("review body must contain 1 to 5000 characters")
+        if timestamp is not None and (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not math.isfinite(timestamp)
+        ):
+            raise GatewayPolicyError("timestamp_seconds must be finite or null")
+        constrained["idempotency_key"] = _principal_idempotency_key(
+            token, constrained.get("idempotency_key")
+        )
+
+    if tool_name == "artifact_stage":
+        inbox = constrained.get("inbox_path")
+        inline = constrained.get("inline_text")
+        if (inbox is None) == (inline is None):
+            raise GatewayPolicyError("artifact_stage requires exactly one input source")
+        if inbox is not None:
+            constrained["inbox_path"] = _safe_inbox_reference(inbox)
+        if inline is not None:
+            if not isinstance(inline, str) or not inline or "\x00" in inline:
+                raise GatewayPolicyError("inline_text must be non-empty UTF-8 text")
+            if len(inline.encode("utf-8")) > INLINE_TEXT_LIMIT:
+                raise GatewayPolicyError("inline_text exceeds the 1 MiB limit")
+
+    if tool_name in {"artifact_import", "produce_staged_artifact"}:
+        stage_id = constrained.get("stage_id")
+        if not isinstance(stage_id, str) or not _STAGE_ID.fullmatch(stage_id):
+            raise GatewayPolicyError("stage_id must be exactly 32 lowercase hexadecimal characters")
+    if tool_name == "produce_staged_artifact":
+        artifact = _safe_artifact(constrained.get("artifact"))
+        if artifact not in STAGED_PRODUCE_TARGETS:
+            raise GatewayPolicyError("artifact is not an agent-authorable staged target")
+        constrained["artifact"] = artifact
 
     return constrained
+
+
+def _sanitize_public_value(
+    value: Any,
+    config: HttpMcpConfig,
+    *,
+    key: str | None = None,
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            field: _sanitize_public_value(item, config, key=str(field))
+            for field, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_public_value(item, config) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    workspace_text = str(config.workspace_root)
+    projects_text = str(config.projects_root)
+    media_tools_text = str(config.media_tools_root)
+    backend_text = str(config.backend_command)
+    if value == workspace_text:
+        return "workspace"
+    if value == projects_text:
+        return "projects"
+    if value.startswith(projects_text + os.sep):
+        relative = value[len(projects_text + os.sep) :]
+        return relative.replace(os.sep, "/")
+    if value.startswith(workspace_text + os.sep):
+        relative = value[len(workspace_text + os.sep) :]
+        return relative.replace(os.sep, "/")
+    if value == media_tools_text or value.startswith(media_tools_text + os.sep):
+        return "bundled-media-tools"
+    if value == backend_text:
+        return "installed-video-studio-mcp"
+
+    path_key = key is not None and any(
+        marker in key.lower()
+        for marker in ("path", "root", "destination", "executable", "command")
+    )
+    if path_key and Path(value).is_absolute():
+        return "server-managed"
+    return (
+        value.replace(workspace_text, "<workspace>")
+        .replace(media_tools_text, "<bundled-media-tools>")
+        .replace(backend_text, "<installed-runtime>")
+    )
+
+
+def _sanitize_public_result(
+    result: types.CallToolResult,
+    config: HttpMcpConfig,
+) -> types.CallToolResult:
+    structured = (
+        _sanitize_public_value(result.structuredContent, config)
+        if result.structuredContent is not None
+        else None
+    )
+    content: list[types.ContentBlock] = []
+    for block in result.content:
+        if isinstance(block, types.TextContent):
+            try:
+                parsed = json.loads(block.text)
+            except (json.JSONDecodeError, TypeError):
+                text = (
+                    block.text.replace(str(config.workspace_root), "<workspace>")
+                    .replace(str(config.media_tools_root), "<bundled-media-tools>")
+                    .replace(str(config.backend_command), "<installed-runtime>")
+                )
+            else:
+                text = json.dumps(
+                    _sanitize_public_value(parsed, config),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            content.append(block.model_copy(update={"text": text}))
+        else:
+            content.append(block)
+    return result.model_copy(
+        update={
+            "content": content,
+            "structuredContent": structured,
+            "meta": _sanitize_public_value(result.meta, config)
+            if result.meta is not None
+            else None,
+        }
+    )
 
 
 def _replace_protected_resource_metadata(app: Any, config: HttpMcpConfig) -> None:
@@ -751,7 +1067,15 @@ def build_app(
                 raise RuntimeError(f"stable video-studio-mcp is missing required tools: {', '.join(missing)}")
             # The allowlist remains authoritative even if a future backend adds
             # a publish or runtime-management tool.
-            yield GatewaySession(backend=backend, tools=tools)
+            public_tools = {
+                name: _public_tool(name, tools[name], TOOL_SCOPES[name])
+                for name in TOOL_SCOPES
+            }
+            yield GatewaySession(
+                backend=backend,
+                tools=tools,
+                public_tools=public_tools,
+            )
 
     parsed_resource = urlparse(config.resource_url)
     server = FastMCP(
@@ -792,13 +1116,7 @@ def build_app(
         for name, required_scope in TOOL_SCOPES.items():
             if required_scope not in token.scopes:
                 continue
-            tool = state.tools[name]
-            description = (tool.description or "").rstrip()
-            available.append(
-                tool.model_copy(
-                    update={"description": f"{description} Requires OAuth scope `{required_scope}`."}
-                )
-            )
+            available.append(state.public_tools[name])
         return available
 
     @server._mcp_server.call_tool()  # noqa: SLF001 - return CallToolResult unchanged
@@ -811,9 +1129,13 @@ def build_app(
             raise GatewayPolicyError(f"insufficient OAuth scope; required: {required_scope}")
         if not isinstance(arguments, dict):
             raise GatewayPolicyError("tool arguments must be an object")
-        constrained = enforce_arguments(name, arguments, config, token)
         state: GatewaySession = server._mcp_server.request_context.lifespan_context  # noqa: SLF001
-        return await state.backend.call_tool(name, constrained)
+        if name not in state.public_tools:
+            raise GatewayPolicyError("tool is not exposed by the HTTP gateway")
+        backend_arguments = _backend_arguments(name, arguments, config)
+        constrained = enforce_arguments(name, backend_arguments, config, token)
+        result = await state.backend.call_tool(name, constrained)
+        return _sanitize_public_result(result, config)
 
     app = server.streamable_http_app()
     _replace_protected_resource_metadata(app, config)

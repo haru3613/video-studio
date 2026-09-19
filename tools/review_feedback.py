@@ -9,30 +9,37 @@ importing the FastAPI review server, so the stable CLI and MCP runner work under
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
 import uuid
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "dashboard"))
 from review_store import ReviewStore  # noqa: E402
+import review_domain  # noqa: E402
+import version_archive  # noqa: E402
 
 
 READ_SCHEMA = "video_studio.review_feedback.v1"
 RESOLUTION_SCHEMA = "video_studio.review_resolution.v1"
 ERROR_SCHEMA = "video_studio.review_feedback_error.v1"
+ADD_SCHEMA = "video_studio.review_add.v1"
+ADD_REQUEST_SCHEMA = "video_studio.review_add_request.v1"
 PACKAGE_SCHEMA = "haru.review_package.v1"
 SOURCE = "studio"
 MAX_JSON_BYTES = 1024 * 1024
 MAX_ASSETS = 100
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+REQUEST_ID = re.compile(r"^[0-9a-f]{32}$")
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
 COVER_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -195,6 +202,57 @@ def _hash_or_missing(workspace: Path, snapshot: dict) -> tuple[str | None, int]:
         raise
 
 
+def _snapshot_fingerprint(workspace: Path, snapshot: dict) -> tuple[str | None, int]:
+    digest, size = _hash_or_missing(workspace, snapshot)
+    if digest == snapshot.get("sha256") and size == snapshot.get("bytes"):
+        return digest, size
+    if snapshot.get("kind") == "video" and snapshot.get("path") == "output/final.mp4":
+        try:
+            project = _project_by_name(workspace, snapshot.get("project"))
+            archived = version_archive.archived_video(
+                project, snapshot.get("sha256"), snapshot.get("bytes")
+            )
+        except (OSError, TypeError, ValueError):
+            archived = None
+        if archived is not None:
+            try:
+                return _stable_hash(archived)
+            except ReviewFeedbackError:
+                pass
+    return None, 0
+
+
+def _duration(path: Path | None, kind: str) -> float | None:
+    if kind == "cover" or path is None or not path.is_file():
+        return None
+    ffprobe = shutil.which(
+        "ffprobe", path=os.pathsep.join([*os.get_exec_path(), "/opt/homebrew/bin", "/usr/local/bin"])
+    )
+    if ffprobe is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        value = float(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return value if result.returncode == 0 and math.isfinite(value) and value >= 0 else None
+
+
 def _bounded_json(path: Path) -> object | None:
     if path.is_symlink():
         raise _invalid("review_package_invalid")
@@ -347,6 +405,10 @@ def _current_package(workspace: Path, project: Path) -> tuple[str, list[dict]]:
         }
         _asset_parts(snapshot["path"], kind)
         digest, size = _hash_or_missing(workspace, snapshot)
+        try:
+            media_path = _asset_path(workspace, snapshot) if digest is not None else None
+        except ReviewFeedbackError:
+            media_path = None
         preview = raw.get("preview_seconds")
         if not (
             preview is None
@@ -367,6 +429,13 @@ def _current_package(workspace: Path, project: Path) -> tuple[str, list[dict]]:
                 "path": raw.get("path"),
                 "sha256": digest,
                 "bytes": size,
+                "url": (
+                    f"/api/review/{quote(SOURCE)}/{quote(project.name)}/asset/"
+                    f"{quote(str(asset_id))}?sha256={digest}"
+                    if digest is not None
+                    else None
+                ),
+                "duration_seconds": _duration(media_path, str(kind)),
                 "preview_seconds": float(preview) if preview is not None else None,
             }
         )
@@ -453,7 +522,7 @@ def _public_comment(
         and item["sha256"] == asset["sha256"]
         for item in current_assets
     )
-    digest, size = _hash_or_missing(workspace, asset)
+    digest, size = _snapshot_fingerprint(workspace, asset)
     available = digest == asset["sha256"] and size == asset["bytes"]
     public_asset = {
         key: asset.get(key)
@@ -497,6 +566,25 @@ def read_feedback(project_value: str) -> dict:
         "code": "review_feedback",
         "project": project.name,
         "package_id": package_id,
+        "assets": [
+            {
+                key: asset.get(key)
+                for key in (
+                    "id",
+                    "kind",
+                    "label",
+                    "role",
+                    "source",
+                    "project",
+                    "path",
+                    "sha256",
+                    "bytes",
+                    "duration_seconds",
+                    "preview_seconds",
+                )
+            }
+            for asset in assets
+        ],
         "counts": counts,
         "comments": comments,
     }
@@ -525,51 +613,117 @@ def resolve_feedback(
         raise _invalid()
 
     store = _store(workspace, project)
-    existing = next(
-        (item for item in store.read_comments() if item.get("id") == comment_id), None
-    )
-    if existing is None:
-        raise _invalid("comment_not_found")
 
-    def mutate(comments: list[dict]) -> tuple[dict, str, str, list[dict]]:
-        comment = next((item for item in comments if item.get("id") == comment_id), None)
-        if comment is None:
-            raise _blocked("review_conflict")
-        comment = _validate_comment(comment)
+    def load_current(_include_durations: bool) -> dict:
         package_id, assets = _current_package(workspace, project)
-        if package_id != expected_package_id:
-            raise _blocked("review_conflict")
-        asset = comment["asset"]
-        if asset["sha256"] != expected_asset_sha256:
-            raise _blocked("review_conflict")
-        current = next(
-            (
-                item
-                for item in assets
-                if item["id"] == asset["id"]
-                and item["source"] == asset["source"]
-                and item["project"] == asset["project"]
-                and item["sha256"] == expected_asset_sha256
-            ),
-            None,
-        )
-        digest, size = _hash_or_missing(workspace, asset)
-        if (
-            current is None
-            or digest != expected_asset_sha256
-            or size != asset["bytes"]
-        ):
-            raise _blocked("review_stale")
-        code = "review_comment_unchanged"
-        if comment["status"] != status_value:
-            comment["status"] = status_value
-            comment["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-            code = "review_comment_updated"
-        return comment, code, package_id, assets
+        return {"package_id": package_id, "assets": assets}
 
-    comment, code, package_id, assets = store.update(mutate)
+    try:
+        comment, code, package_id = review_domain.resolve_comment(
+            store,
+            comment_id=comment_id,
+            status=status_value,
+            expected_package_id=expected_package_id,
+            expected_asset_sha256=expected_asset_sha256,
+            load_current=load_current,
+            snapshot_fingerprint=lambda asset: _snapshot_fingerprint(workspace, asset),
+        )
+    except review_domain.ReviewDomainError as error:
+        if error.code in {"review_conflict", "review_stale"}:
+            raise _blocked(error.code) from error
+        raise _invalid(error.code) from error
+    _, assets = _current_package(workspace, project)
     return {
         "schema": RESOLUTION_SCHEMA,
+        "outcome": "ok",
+        "code": code,
+        "project": project.name,
+        "package_id": package_id,
+        "comment": _public_comment(comment, workspace, assets),
+        "effects": {
+            "technical_qa_pass": False,
+            "human_approval": False,
+            "publishing_approval": False,
+        },
+    }
+
+
+def _add_request(project: Path, request_id: str) -> dict:
+    if not REQUEST_ID.fullmatch(request_id):
+        raise _invalid()
+    state = project / ".hvp"
+    directory = state / "review-requests"
+    request_path = directory / f"{request_id}.json"
+    for path in (state, directory, request_path):
+        if path.is_symlink():
+            raise _invalid("review_request_invalid")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(request_path, flags)
+    except OSError as error:
+        raise _invalid("review_request_invalid") from error
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > 64 * 1024
+            or metadata.st_mode & 0o077
+        ):
+            raise _invalid("review_request_invalid")
+        raw = b""
+        while len(raw) <= 64 * 1024:
+            chunk = os.read(fd, 64 * 1024 + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise _invalid("review_request_invalid") from error
+    expected = {
+        "schema",
+        "client_id",
+        "package_id",
+        "asset_id",
+        "asset_sha256",
+        "timestamp_seconds",
+        "body",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise _invalid("review_request_invalid")
+    if value.pop("schema") != ADD_REQUEST_SCHEMA:
+        raise _invalid("review_request_invalid")
+    return value
+
+
+def add_feedback(project_value: str, *, request_id: str) -> dict:
+    workspace, project = _workspace_project(project_value)
+    payload = _add_request(project, request_id)
+    store = _store(workspace, project)
+
+    def load_current(_include_durations: bool) -> dict:
+        package_id, assets = _current_package(workspace, project)
+        return {"package_id": package_id, "assets": assets}
+
+    try:
+        comment, code, package_id = review_domain.add_comment(
+            store,
+            payload,
+            load_current=load_current,
+            snapshot_fingerprint=lambda asset: _snapshot_fingerprint(workspace, asset),
+        )
+    except review_domain.ReviewDomainError as error:
+        if error.code in {"review_conflict", "review_stale"}:
+            raise _blocked(error.code) from error
+        raise _invalid() from error
+    _, assets = _current_package(workspace, project)
+    return {
+        "schema": ADD_SCHEMA,
         "outcome": "ok",
         "code": code,
         "project": project.name,
@@ -589,10 +743,13 @@ class ContractParser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = ContractParser(description="Read or resolve Video Studio review feedback")
+    parser = ContractParser(description="Read, add, or resolve Video Studio review feedback")
     commands = parser.add_subparsers(dest="command", required=True)
     read = commands.add_parser("read")
     read.add_argument("project_root")
+    add = commands.add_parser("add")
+    add.add_argument("project_root")
+    add.add_argument("--request-id", required=True)
     resolve = commands.add_parser("resolve")
     resolve.add_argument("project_root")
     resolve.add_argument("--comment-id", required=True)
@@ -611,6 +768,8 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         if args.command == "read":
             result = read_feedback(args.project_root)
+        elif args.command == "add":
+            result = add_feedback(args.project_root, request_id=args.request_id)
         else:
             result = resolve_feedback(
                 args.project_root,

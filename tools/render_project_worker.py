@@ -416,6 +416,7 @@ def render_main(argv):
         success = {
             "schema": "haru.render_result.v1",
             "status": "render_complete",
+            "render_input_revision": render_contract.render_input_revision(project),
             "project": project.name,
             "output": output_value,
             "video_sha256": digest,

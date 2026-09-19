@@ -27,6 +27,10 @@ The core retains the original `haru.*` artifact schemas as a compatibility
 contract. They are format names; no original channel, voice, credentials, or
 production media are supplied. New public interfaces use `video_studio.*`.
 
+New render receipts bind the complete render-input revision. Historical receipts
+without that binding remain readable but are treated as stale; re-render the
+project before a new technical delivery. They are never silently upgraded.
+
 ## Prerequisites
 
 The current verification targets are macOS arm64 and Ubuntu 24.04 x86_64.
@@ -63,7 +67,7 @@ launcher at `~/.local/bin/video-studio-mcp` is not replaced.
 Use a workspace outside the source checkout:
 
 ```sh
-scripts/init-workspace "$HOME/VideoStudio"
+video-studio workspace init --workspace "$HOME/VideoStudio"
 video-studio create --projects-root "$HOME/VideoStudio/projects" \
   --project demo --idempotency-key create-demo
 scripts/prepare-example "$HOME/VideoStudio/projects/demo" --speech
@@ -96,7 +100,7 @@ exact typed input schemas. Run `video-studio job --help` for required parameters
 ## Review and export
 
 ```sh
-scripts/dashboard --workspace "$HOME/VideoStudio"
+video-studio ui --workspace "$HOME/VideoStudio"
 ```
 
 Open the displayed localhost address and enter the one-time code from the
@@ -105,12 +109,38 @@ For a private server, use an SSH tunnel to this loopback UI. Comments remain
 bound to the reviewed media version; resolving a comment is not a publication
 approval.
 
-`delivery_status` performs fresh technical checks. `export_delivery` exports an
+`video-studio delivery status --project-root "$HOME/VideoStudio/projects/demo"`
+performs fresh technical checks (`delivery_status` over MCP). `export_delivery` exports an
 immutable bundle and requires a valid lease and idempotency key. Set
 `VIDEO_STUDIO_DELIVERY_ROOT` to an existing absolute output directory in the
 operator environment before launching CLI/MCP. Export manifests explicitly
 record content checks that were not performed. The source tree has no publishing
 channel or signing key configured, and upload remains held.
+
+## Workspace backup and restore
+
+Backup and restore are local administrator commands. They run from the active
+installed source closure with the managed Python environment and are not exposed
+as MCP or HTTP tools.
+
+```sh
+mkdir -p "$HOME/VideoStudioBackups"
+video-studio workspace backup \
+  --workspace "$HOME/VideoStudio" \
+  --destination "$HOME/VideoStudioBackups"
+
+video-studio workspace restore \
+  --backup "$HOME/VideoStudioBackups/<backup-directory>" \
+  --destination "$HOME/VideoStudioRestored"
+```
+
+Backup refuses active render jobs and takes the workspace-wide barrier so CLI,
+MCP, intake, and review writes cannot cross the snapshot. Restore verifies the
+manifest and file hashes, requires a new empty destination, invalidates leases,
+jobs, publish approval, template trust, and path-bound signatures, and rekeys
+review storage for the new canonical path. Provider credentials, OAuth material,
+browser/UI sessions, signing keys, and external attestation ledgers are excluded
+and must be recovered separately by the operator.
 
 ## MCP
 
@@ -143,6 +173,7 @@ Swift fake-key checks; it is not publication permission.
 
 See [contributing](CONTRIBUTING.md), [third-party notices](THIRD_PARTY_NOTICES.md),
 [implementation scope](docs/implementation-plan.md), and
-[source provenance](docs/source-import.json). Generated media, credentials,
+[source provenance](docs/source-import.json), and [security reporting](SECURITY.md).
+Generated media, credentials,
 provider responses, browser sessions, and private operator data stay outside
 this repository. No license grant is implied until the owner selects a license.

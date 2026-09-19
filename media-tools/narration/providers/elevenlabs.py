@@ -1,33 +1,53 @@
-"""ElevenLabs with-timestamps client, extracted 1:1 from
-generate_narration_with_srt.py (2026-07-07, Step-1 refactor, zero behavior change)."""
+"""ElevenLabs timestamped TTS adapter with explicit submission outcomes.
+
+HTTP pre-charge rejections are distinguished from ambiguous transport/server
+failures so the caller can release or retain its durable budget reservation.
+"""
 import base64
+import binascii
 import json
 import os
 import urllib.error
 import urllib.request
 
-from .base import AlignmentUnit, ProviderError, SynthesisResult, TTSProvider
+from .base import (
+    AlignmentUnit,
+    ProviderConfirmedFailure,
+    ProviderError,
+    ProviderSubmissionUnknown,
+    SynthesisResult,
+    TTSProvider,
+)
 
 MODEL_CREDITS_PER_CHAR = {"eleven_v3": 1.0, "eleven_flash_v2_5": 0.5, "eleven_turbo_v2_5": 0.5}
+# Internal release policy: only responses that prove the provider rejected the
+# request before synthesis may release a reservation. Timeout-like or
+# state-conflict statuses (notably 408 and 409) are deliberately absent.
+CONFIRMED_NO_CHARGE_HTTP_STATUSES = frozenset(
+    {400, 401, 402, 403, 404, 413, 422, 429}
+)
 
 
 def load_key() -> str:
     key = os.getenv("ELEVENLABS_API_KEY", "").strip()
     path = os.getenv("ELEVENLABS_API_KEY_PATH")
     if key and path:
-        raise ProviderError(
-            "ERROR: configure only one of ELEVENLABS_API_KEY or ELEVENLABS_API_KEY_PATH"
+        raise ProviderConfirmedFailure(
+            "ERROR: configure only one of ELEVENLABS_API_KEY or ELEVENLABS_API_KEY_PATH",
+            proof="local_preflight:conflicting_credential_configuration",
         )
     if path:
         try:
             key = open(os.path.expanduser(path), encoding="utf-8").read().strip()
         except OSError as error:
-            raise ProviderError(
-                f"ERROR: cannot read ELEVENLABS_API_KEY_PATH: {error}"
+            raise ProviderConfirmedFailure(
+                f"ERROR: cannot read ELEVENLABS_API_KEY_PATH: {error}",
+                proof="local_preflight:credential_file_unreadable",
             ) from error
     if not key:
-        raise ProviderError(
-            "ERROR: set ELEVENLABS_API_KEY or ELEVENLABS_API_KEY_PATH"
+        raise ProviderConfirmedFailure(
+            "ERROR: set ELEVENLABS_API_KEY or ELEVENLABS_API_KEY_PATH",
+            proof="local_preflight:credential_missing",
         )
     return key
 
@@ -74,7 +94,9 @@ class ElevenLabsProvider(TTSProvider):
             if stream:
                 chunks = [json.loads(line) for line in response if line.strip()]
                 if not chunks:
-                    raise ProviderError("ERROR: empty streaming response")
+                    raise ProviderSubmissionUnknown(
+                        "ERROR: empty streaming response"
+                    )
                 audio = b"".join(
                     base64.b64decode(chunk.get("audio_base64", ""))
                     for chunk in chunks
@@ -86,7 +108,10 @@ class ElevenLabsProvider(TTSProvider):
                     starts = al.get("character_start_times_seconds", [])
                     ends = al.get("character_end_times_seconds", [])
                     if not (len(chars) == len(starts) == len(ends)):
-                        raise ProviderError("ERROR: malformed streaming alignment")
+                        raise ProviderSubmissionUnknown(
+                            "ERROR: malformed streaming alignment",
+                            provider_request_id=chunk.get("request_id"),
+                        )
                     offset = (
                         units[-1].end
                         if units and starts and starts[0] < units[-1].start
@@ -106,11 +131,36 @@ class ElevenLabsProvider(TTSProvider):
                 ends = al.get("character_end_times_seconds", [])
                 units = [AlignmentUnit(c, s, e) for c, s, e in zip(chars, starts, ends)]
         except urllib.error.HTTPError as e:
-            raise ProviderError(f"ERROR HTTP {e.code}: {e.read().decode()[:400]}")
-        except (OSError, TimeoutError, json.JSONDecodeError) as e:
-            raise ProviderError(f"ERROR: ElevenLabs request failed: {e}") from e
+            detail = e.read().decode(errors="replace")[:400]
+            if e.code in CONFIRMED_NO_CHARGE_HTTP_STATUSES:
+                raise ProviderConfirmedFailure(
+                    f"ERROR HTTP {e.code}: {detail}",
+                    proof=f"provider_http_rejection:{e.code}",
+                ) from e
+            raise ProviderSubmissionUnknown(
+                f"ERROR HTTP {e.code}: {detail}"
+            ) from e
+        except (
+            OSError,
+            TimeoutError,
+            json.JSONDecodeError,
+            binascii.Error,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ) as e:
+            raise ProviderSubmissionUnknown(
+                f"ERROR: ElevenLabs submission outcome unknown: {e}"
+            ) from e
         if not units or not audio:
-            raise ProviderError("ERROR: no alignment returned")
+            raise ProviderSubmissionUnknown(
+                "ERROR: accepted response had no usable audio/alignment",
+                provider_request_id=(
+                    d.get("request_id")
+                    if isinstance(d, dict)
+                    else None
+                ),
+            )
 
         def header(*names):
             for name in names:
@@ -197,8 +247,8 @@ class ElevenLabsProvider(TTSProvider):
         except (KeyError, TypeError, ValueError):
             raise ProviderError("ERROR: subscription response missing character_count")
 
-    def history_costs(self, request_ids) -> dict[str, int]:
-        """Return exact official credit deltas for recent request IDs."""
+    def history_records(self, request_ids) -> dict[str, dict]:
+        """Return bounded official history evidence for exact request IDs."""
         wanted = set(request_ids)
         if not wanted:
             return {}
@@ -211,7 +261,7 @@ class ElevenLabsProvider(TTSProvider):
             payload = json.load(urllib.request.urlopen(req, timeout=30))
         except urllib.error.HTTPError as e:
             raise ProviderError(f"ERROR HTTP {e.code}: {e.read().decode()[:400]}")
-        costs = {}
+        records = {}
         for item in payload.get("history", []):
             request_id = item.get("request_id")
             if request_id not in wanted:
@@ -221,5 +271,18 @@ class ElevenLabsProvider(TTSProvider):
                 end = int(item["character_count_change_to"])
             except (KeyError, TypeError, ValueError):
                 continue
-            costs[request_id] = max(0, end - start)
-        return costs
+            records[request_id] = {
+                "request_id": request_id,
+                "voice_id": item.get("voice_id"),
+                "model_id": item.get("model_id"),
+                "text": item.get("text"),
+                "character_cost": max(0, end - start),
+            }
+        return records
+
+    def history_costs(self, request_ids) -> dict[str, int]:
+        """Return exact official credit deltas for recent request IDs."""
+        return {
+            request_id: record["character_cost"]
+            for request_id, record in self.history_records(request_ids).items()
+        }

@@ -313,7 +313,7 @@ function relTime(iso) {
 
 function statusMeta(s) {
   if (!s) return { cls: 'none', label: '無狀態資料' };
-  const cls = /requires_harvey|approval/.test(s) ? 'harvey'
+  const cls = /requires_operator_approval|approval/.test(s) ? 'harvey'
     : /fail|block|error/.test(s) ? 'red'
     : /parked|draft|await|hold/.test(s) ? 'parked'
     : /pass|ready|ship|done|complete/.test(s) ? 'pass' : 'none';

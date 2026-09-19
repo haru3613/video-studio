@@ -16,13 +16,14 @@ import os
 import shutil
 import signal
 import sqlite3
-import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
+
+import render_contract
 
 
 SCHEMA = "video-studio.jobs.v1"
@@ -159,22 +160,23 @@ def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _excluded(relative: str) -> bool:
-    return (
-        relative == ".hvp"
-        or relative.startswith(".hvp/")
-        or relative == "output/.staging"
-        or relative.startswith("output/.staging/")
-        or relative in MUTABLE_OUTPUTS
-        or relative.startswith("output/final")
-        or ".superseded-" in relative
+def _generated_cache(relative: str) -> bool:
+    # Webpack writes compiler caches while rendering. Do not admit a caller's
+    # prebuilt cache into a snapshot, or treat fresh compiler output as source.
+    parts = relative.split("/")
+    return any(
+        parts[index : index + 2] == ["node_modules", ".cache"]
+        for index in range(len(parts) - 1)
     )
 
 
 def _copy_excluded(relative: str) -> bool:
     return (
-        relative == ".hvp"
+        _generated_cache(relative)
+        or relative == ".hvp"
         or relative.startswith(".hvp/")
+        or relative == "output/versions"
+        or relative.startswith("output/versions/")
         or relative == "output/.staging"
         or relative.startswith("output/.staging/")
         or relative in MUTABLE_OUTPUTS
@@ -206,34 +208,7 @@ def _validate_links(project: Path) -> None:
 
 
 def _digest_tree(root: Path) -> str:
-    digest = hashlib.sha256()
-    for current, directories, files in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        relative_root = _relative(current_path, root) if current_path != root else ""
-        directories[:] = sorted(
-            name
-            for name in directories
-            if not _excluded("/".join(filter(None, (relative_root, name))))
-        )
-        for name in sorted([*directories, *files]):
-            path = current_path / name
-            relative = "/".join(filter(None, (relative_root, name)))
-            if _excluded(relative):
-                continue
-            metadata = path.lstat()
-            digest.update(relative.encode("utf-8") + b"\0")
-            if stat.S_ISLNK(metadata.st_mode):
-                digest.update(b"l" + os.readlink(path).encode("utf-8") + b"\0")
-            elif stat.S_ISDIR(metadata.st_mode):
-                digest.update(b"d\0")
-            elif stat.S_ISREG(metadata.st_mode):
-                digest.update(b"f" + str(metadata.st_mode & 0o777).encode("ascii") + b"\0")
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-            else:
-                raise ValueError("special file in project inputs")
-    return digest.hexdigest()
+    return render_contract.render_input_revision(root)
 
 
 def project_revision(project: Path) -> str:
@@ -394,7 +369,9 @@ def _wait_for_claim(project: Path, job_id: str, timeout: float = 2.0) -> dict:
     return job
 
 
-def submit(project_value: Path, tools_value: Path, worker_value: Path) -> tuple[dict, bool]:
+def submit(
+    project_value: Path, tools_value: Path, worker_value: Path
+) -> tuple[dict, bool]:
     project = _direct_directory(project_value)
     tools = _direct_directory(tools_value)
     worker = Path(worker_value).resolve(strict=True)
@@ -419,7 +396,16 @@ def submit(project_value: Path, tools_value: Path, worker_value: Path) -> tuple[
             """INSERT INTO jobs
                (job_id,kind,project,tools_root,worker,status,epoch,revision,created_at,updated_at)
                VALUES (?,?,?,?,?,'queued',1,?,?,?)""",
-            (job_id, "render", str(project), str(tools), str(worker), revision, now, now),
+            (
+                job_id,
+                "render",
+                str(project),
+                str(tools),
+                str(worker),
+                revision,
+                now,
+                now,
+            ),
         )
         connection.execute("COMMIT")
         try:
@@ -455,7 +441,9 @@ def submit(project_value: Path, tools_value: Path, worker_value: Path) -> tuple[
         connection.close()
 
 
-def get_job(project_value: Path, job_id: str | None = None, refresh: bool = True) -> dict | None:
+def get_job(
+    project_value: Path, job_id: str | None = None, refresh: bool = True
+) -> dict | None:
     project = _direct_directory(project_value)
     connection = _connect(project)
     try:
@@ -464,12 +452,20 @@ def get_job(project_value: Path, job_id: str | None = None, refresh: bool = True
                 "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT 1"
             ).fetchone()
         else:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
         job = _row(row)
         if not job:
             return None
-        if refresh and job["status"] in ("running", "cancel_requested", "promoting") and not _same_process(job):
-            status = "cancelled" if job["status"] == "cancel_requested" else "interrupted"
+        if (
+            refresh
+            and job["status"] in ("running", "cancel_requested", "promoting")
+            and not _same_process(job)
+        ):
+            status = (
+                "cancelled" if job["status"] == "cancel_requested" else "interrupted"
+            )
             if job["status"] == "promoting":
                 status = _recover_promotion(project, job)
             connection.execute("BEGIN IMMEDIATE")
@@ -485,7 +481,9 @@ def get_job(project_value: Path, job_id: str | None = None, refresh: bool = True
                 ),
             )
             connection.execute("COMMIT")
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)
+            ).fetchone()
             job = _row(row)
         _projection(project, job)
         return job
@@ -507,7 +505,9 @@ def worker_context(project_value: Path, job_id: str, epoch: int) -> dict | None:
                WHERE job_id=? AND epoch=? AND status='queued'""",
             (pid, token, pid, _now(), job_id, epoch),
         ).rowcount
-        row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
         connection.execute("COMMIT")
         job = _row(row)
         if changed != 1 or not job:
@@ -523,7 +523,9 @@ def worker_failed(project_value: Path, job_id: str, epoch: int, exit_code: int) 
     connection = _connect(project)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT status FROM jobs WHERE job_id=? AND epoch=?", (job_id, epoch)).fetchone()
+        row = connection.execute(
+            "SELECT status FROM jobs WHERE job_id=? AND epoch=?", (job_id, epoch)
+        ).fetchone()
         if row is not None:
             status = "cancelled" if row["status"] == "cancel_requested" else "failed"
             connection.execute(
@@ -545,9 +547,9 @@ def _validated_candidate(project: Path, job: dict) -> tuple[Path, Path, dict]:
     if _digest_tree(snapshot) != job["snapshot_digest"]:
         raise ValueError("snapshot changed")
     snapshot_manifest = json.loads(
-        (_attempt_root(project, job["job_id"], job["epoch"]) / "snapshot.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            _attempt_root(project, job["job_id"], job["epoch"]) / "snapshot.json"
+        ).read_text(encoding="utf-8")
     )
     expected_template = snapshot_manifest.get("template_digest")
     if (
@@ -557,12 +559,17 @@ def _validated_candidate(project: Path, job: dict) -> tuple[Path, Path, dict]:
         raise ValueError("template authorization changed")
     video = snapshot / "output/final.mp4"
     marker_path = Path(str(video) + ".render-result")
-    if video.is_symlink() or marker_path.is_symlink() or not video.is_file() or not marker_path.is_file():
+    if (
+        video.is_symlink()
+        or marker_path.is_symlink()
+        or not video.is_file()
+        or not marker_path.is_file()
+    ):
         raise ValueError("candidate missing")
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    import render_contract
-
-    if not render_contract.valid_final_result(snapshot, marker, video):
+    if marker.get(render_contract.RENDER_INPUT_REVISION_FIELD) != job[
+        "revision"
+    ] or not render_contract.valid_final_result(snapshot, marker, video):
         raise ValueError("candidate invalid")
     return video, marker_path, marker
 
@@ -571,11 +578,16 @@ def _preserve_previous(output: Path, job_id: str) -> dict:
     marker_path = Path(str(output) + ".render-result")
     if not output.is_file() or output.is_symlink():
         return {}
+    from version_archive import preserve_video
+
+    preserve_video(output)
     stamp = job_id[:12]
     if marker_path.is_file() and not marker_path.is_symlink():
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            stamp = str(marker.get("narration_sha256") or marker.get("video_sha256") or stamp)[:12]
+            stamp = str(
+                marker.get("narration_sha256") or marker.get("video_sha256") or stamp
+            )[:12]
         except (OSError, ValueError, json.JSONDecodeError):
             pass
     backups = {}
@@ -652,7 +664,9 @@ def promote_candidate(project_value: Path, job_id: str, epoch: int) -> bool:
     connection = _connect(project)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
         job = _row(row)
         if not job or job["epoch"] != epoch or job["status"] != "running":
             connection.execute("ROLLBACK")
@@ -729,7 +743,9 @@ def cancel(project_value: Path, job_id: str) -> dict:
     connection = _connect(project)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
         job = _row(row)
         if not job:
             connection.execute("ROLLBACK")
@@ -769,7 +785,9 @@ def resume(project_value: Path, job_id: str) -> dict:
     connection = _connect(project)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
         job = _row(row)
         if not job or job["status"] not in TERMINAL or job["status"] == "succeeded":
             connection.execute("ROLLBACK")
@@ -786,12 +804,22 @@ def resume(project_value: Path, job_id: str) -> dict:
         )
         connection.execute("COMMIT")
         snapshot, snapshot_digest = _snapshot(project, job_id, epoch)
-        if snapshot_digest != job["revision"] or project_revision(project) != job["revision"]:
+        if (
+            snapshot_digest != job["revision"]
+            or project_revision(project) != job["revision"]
+        ):
             raise ValueError("project changed while snapshotting")
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             "UPDATE jobs SET snapshot_root=?,candidate_root=?,snapshot_digest=?,updated_at=? WHERE job_id=? AND epoch=? AND status='queued'",
-            (str(snapshot), str(snapshot / "output"), snapshot_digest, _now(), job_id, epoch),
+            (
+                str(snapshot),
+                str(snapshot / "output"),
+                snapshot_digest,
+                _now(),
+                job_id,
+                epoch,
+            ),
         )
         connection.execute("COMMIT")
         job = get_job(project, job_id, refresh=False)

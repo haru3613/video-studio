@@ -11,9 +11,10 @@ use pipeline::ProjectStore;
 use pipeline::application::{
     self, ApprovePublishRequest, CommandExecutor, CommandResult, LeaseInput, ProcessExecutor,
     ProduceArtifactRequest, PronunciationReviewRequest, PublishRequest, ReconcileUploadRequest,
-    ReplaceThumbnailRequest, ReviewResolutionRequest, RunNextRequest, SelfEvalReviewInput,
-    VisualQaRequest, approve_publish, prepare_publish, produce_artifact, pronunciation_review,
-    publish, reconcile_upload, replace_thumbnail, run_next, verify, visual_qa,
+    ReplaceThumbnailRequest, ReviewAddRequest, ReviewResolutionRequest, RunNextRequest,
+    SelfEvalReviewInput, VisualQaRequest, approve_publish, prepare_publish, produce_artifact,
+    pronunciation_review, publish, reconcile_upload, replace_thumbnail, run_next, verify,
+    visual_qa,
 };
 
 use pipeline::runtime::RuntimeBinding;
@@ -2757,7 +2758,7 @@ fn review_feedback_is_read_only_and_resolution_is_digest_bound_without_approval_
         "outcome": "ok",
         "code": "review_feedback",
         "project": "reviewed-video",
-        "package_id": package_id,
+        "package_id": package_id.clone(),
         "counts": {"open": 1, "resolved": 0},
         "comments": [comment],
     });
@@ -2775,12 +2776,51 @@ fn review_feedback_is_read_only_and_resolution_is_digest_bound_without_approval_
         [OsString::from("read"), project.clone().into_os_string()]
     );
 
-    let lease = ProjectStore::new(&project)
-        .claim_at("reviewer", Duration::from_secs(60), SystemTime::now())
-        .unwrap();
+    let add_request = ReviewAddRequest {
+        project_root: project.clone(),
+        client_id: "00000000-0000-4000-8000-000000000003".to_owned(),
+        package_id: package_id.clone(),
+        asset_id: "video-current".to_owned(),
+        asset_sha256: asset_sha.clone(),
+        timestamp_seconds: Some(1.5),
+        body: "Please tighten this cut.".to_owned(),
+    };
+    let added = serde_json::json!({
+        "schema": "video_studio.review_add.v1",
+        "outcome": "ok",
+        "code": "review_comment_added",
+        "project": "reviewed-video",
+        "package_id": package_id.clone(),
+        "comment": {
+            "id": "00000000-0000-4000-8000-000000000004",
+            "asset": {"id": "video-current", "sha256": asset_sha.clone()},
+        },
+        "effects": {
+            "technical_qa_pass": false,
+            "human_approval": false,
+            "publishing_approval": false,
+        },
+    });
+    let mut add_executor = FakeExecutor {
+        data: Some(added),
+        ..FakeExecutor::default()
+    };
+    let add = application::review_add(&add_request, &repo, &mut add_executor);
+    assert_eq!(add.code, "review_comment_added");
+    assert_eq!(add_executor.calls[0].1[0], "add");
+    assert_eq!(add_executor.calls[0].1[1], project);
+    assert_eq!(add_executor.calls[0].1[2], "--request-id");
+    assert_eq!(add_executor.calls[0].1[3].to_string_lossy().len(), 32);
+    assert_eq!(
+        fs::read_dir(project.join(".hvp/review-requests"))
+            .unwrap()
+            .count(),
+        0,
+        "private add request survived wrapper completion"
+    );
+
     let request = ReviewResolutionRequest {
         project_root: project.clone(),
-        lease: lease_input(&lease),
         comment_id: comment_id.to_owned(),
         status: "resolved".to_owned(),
         expected_package_id: package_id.clone(),

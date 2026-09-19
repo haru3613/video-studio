@@ -87,6 +87,9 @@ class LocalDeliveryTest(unittest.TestCase):
         marker = {
             "schema": "haru.render_result.v1",
             "status": "render_complete",
+            "render_input_revision": local_delivery.render_contract.render_input_revision(
+                self.project
+            ),
             "project": self.project.name,
             "output": "output/final.mp4",
             "video_sha256": digest(self.video),
@@ -138,6 +141,27 @@ class LocalDeliveryTest(unittest.TestCase):
         self.assertIn(
             "render_receipt_invalid", {item["code"] for item in stale["blockers"]}
         )
+
+    def test_visual_content_change_blocks_normal_delivery_and_export(self):
+        content = self.project / "remotion/src/content.json"
+        content.parent.mkdir(parents=True)
+        content.write_text('{"title":"first"}', encoding="utf-8")
+        self.write_receipt()
+        self.assertEqual(
+            local_delivery.technical_status(self.project)["status"], "technical_ready"
+        )
+        content.write_text('{"title":"changed"}', encoding="utf-8")
+        stale = local_delivery.technical_status(self.project)
+        self.assertIn(
+            "render_receipt_invalid", {item["code"] for item in stale["blockers"]}
+        )
+        with self.assertRaises(local_delivery.DeliveryError) as blocked:
+            local_delivery.export_delivery(
+                self.project,
+                destination=self.delivery,
+                idempotency_key="stale-visual",
+            )
+        self.assertEqual(blocked.exception.code, "delivery_blocked")
 
     def test_invalid_receipt_and_subtitle_ranges_are_blockers(self):
         Path(str(self.video) + ".render-result").write_text(

@@ -205,7 +205,7 @@ ARTIFACTS = [
     Artifact(
         "script-proposal.md",
         "proposal",
-        "The approved script. Written after Harvey picks the topic.",
+        "The approved script. Written after the operator picks the topic.",
     ),
     Artifact(
         "sources.md",
@@ -248,16 +248,16 @@ ARTIFACTS = [
     Artifact(
         "editorial-contract.json",
         "editorial",
-        "Cue-complete Mina A-roll, B-roll/PIP, and Motion Canvas shot contract.",
+        "Cue-complete presenter A-roll, B-roll/PIP, and Motion Canvas shot contract.",
         kind="json",
-        profiles=("mina_longform.v1",),
+        profiles=("host_longform.v1",),
     ),
     Artifact(
         "quality-review/editorial-preview/review.json",
         "editorial_preview",
         "Digest-bound pass receipt for the 60-90 second editorial preview.",
         kind="json",
-        profiles=("mina_longform.v1",),
+        profiles=("host_longform.v1",),
     ),
     Artifact(
         "output/",
@@ -696,9 +696,9 @@ def outstanding(project: Path) -> list:
             known_profile = ""
         elif (
             value.get("lane_contract") == "social_issue_longform.v1"
-            and value.get("production_profile") == "mina_longform.v1"
+            and value.get("production_profile") == "host_longform.v1"
         ):
-            known_profile = "mina_longform.v1"
+            known_profile = "host_longform.v1"
     for artifact in ARTIFACTS:
         if (
             artifact.profiles

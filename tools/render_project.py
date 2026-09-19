@@ -116,6 +116,7 @@ def valid_job(project: Path, job: dict | None) -> bool:
         and job.get("launcher") == "portable-python"
         and isinstance(job.get("job_id"), str)
         and isinstance(job.get("epoch"), int)
+        and render_contract.valid_sha256(job.get("revision"), lowercase=True)
         and job.get("output") == "output/final.mp4"
     )
 
@@ -311,7 +312,9 @@ def run(project_value, tools_value) -> tuple[dict, int]:
                 if durable["status"] in {"cancelled", "interrupted"}:
                     return envelope(project, "error", "render_aborted", durable), 4
                 if durable["status"] != "succeeded":
-                    return envelope(project, "error", "render_result_invalid", durable), 4
+                    return envelope(
+                        project, "error", "render_result_invalid", durable
+                    ), 4
             receipt = start_job(project, tools)
             return envelope(
                 project,
@@ -332,9 +335,7 @@ def run(project_value, tools_value) -> tuple[dict, int]:
             "epoch": durable["epoch"],
             "revision": durable["revision"],
             "pid": durable.get("pid"),
-            "log": str(
-                project / "output/.staging" / durable["job_id"] / "worker.log"
-            ),
+            "log": str(project / "output/.staging" / durable["job_id"] / "worker.log"),
             "output": "output/final.mp4",
             "started_at": durable["created_at"],
         }
@@ -378,9 +379,11 @@ def main(argv: list[str]) -> int:
     action = "run"
     if len(argv) > 1 and argv[1] in {"--status", "--cancel", "--resume"}:
         action = argv[1][2:]
-    valid = (action == "run" and len(argv) == 3) or (
-        action == "status" and len(argv) in {3, 4}
-    ) or (action in {"cancel", "resume"} and len(argv) == 4)
+    valid = (
+        (action == "run" and len(argv) == 3)
+        or (action == "status" and len(argv) in {3, 4})
+        or (action in {"cancel", "resume"} and len(argv) == 4)
+    )
     if not valid:
         print(
             json.dumps(
@@ -392,7 +395,9 @@ def main(argv: list[str]) -> int:
         if action == "run":
             response, exit_code = run(argv[1], argv[2])
         elif action == "status":
-            response, exit_code = job_status(argv[2], argv[3] if len(argv) == 4 else None)
+            response, exit_code = job_status(
+                argv[2], argv[3] if len(argv) == 4 else None
+            )
         elif action == "cancel":
             response, exit_code = cancel_job(argv[2], argv[3])
         else:

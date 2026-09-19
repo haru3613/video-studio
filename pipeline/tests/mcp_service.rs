@@ -166,8 +166,6 @@ fn review_resolution_input_is_digest_bound_and_accepts_no_storage_authority() {
     let input = json!({
         "schema_version": 1,
         "project_root": "/workspace/projects/demo",
-        "owner": "agent",
-        "lease_id": "00000000-0000-4000-8000-000000000001",
         "comment_id": "00000000-0000-4000-8000-000000000002",
         "status": "resolved",
         "expected_package_id": "a".repeat(64),
@@ -175,12 +173,43 @@ fn review_resolution_input_is_digest_bound_and_accepts_no_storage_authority() {
         "idempotency_key": "resolve-once",
     });
     assert!(serde_json::from_value::<mcp::ReviewResolveInput>(input.clone()).is_ok());
-    for forbidden in ["storage_root", "executable", "source_path", "approval"] {
+    for forbidden in [
+        "owner",
+        "lease_id",
+        "storage_root",
+        "executable",
+        "source_path",
+        "approval",
+    ] {
         let mut hostile = input.clone();
         hostile[forbidden] = json!("caller-controlled");
         assert!(
             serde_json::from_value::<mcp::ReviewResolveInput>(hostile).is_err(),
             "review resolution accepted {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn review_add_input_carries_comment_data_but_no_lease_or_storage_authority() {
+    let input = json!({
+        "schema_version": 1,
+        "project_root": "/workspace/projects/demo",
+        "client_id": "00000000-0000-4000-8000-000000000003",
+        "package_id": "a".repeat(64),
+        "asset_id": "video-current",
+        "asset_sha256": "b".repeat(64),
+        "timestamp_seconds": 1.5,
+        "body": "Please tighten this cut.",
+        "idempotency_key": "review-add-once",
+    });
+    assert!(serde_json::from_value::<mcp::ReviewAddInput>(input.clone()).is_ok());
+    for forbidden in ["owner", "lease_id", "storage_root", "executable", "actor"] {
+        let mut hostile = input.clone();
+        hostile[forbidden] = json!("caller-controlled");
+        assert!(
+            serde_json::from_value::<mcp::ReviewAddInput>(hostile).is_err(),
+            "review add accepted {forbidden}"
         );
     }
 }
@@ -625,7 +654,9 @@ async fn shell_and_mcp_share_state_and_duplicate_mutation_is_not_reexecuted() {
         names,
         [
             "approve_publish",
+            "artifact_import",
             "artifact_index",
+            "artifact_stage",
             "create",
             "delivery_status",
             "export_delivery",
@@ -640,11 +671,14 @@ async fn shell_and_mcp_share_state_and_duplicate_mutation_is_not_reexecuted() {
             "prepare_publish",
             "prepare_publish_approval",
             "produce_artifact",
+            "produce_staged_artifact",
+            "project_list",
             "pronunciation_review",
             "publish",
             "reconcile_upload",
             "record_selection",
             "replace_thumbnail",
+            "review_add",
             "review_feedback",
             "review_resolve",
             "run_next",
@@ -652,6 +686,7 @@ async fn shell_and_mcp_share_state_and_duplicate_mutation_is_not_reexecuted() {
             "status",
             "verify",
             "visual_qa",
+            "workspace_info",
         ]
     );
     assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
@@ -1096,7 +1131,7 @@ async fn stdio_binary_serves_the_same_typed_tools_and_names_its_runtime() {
     let client = ().serve(transport).await.unwrap();
 
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 34);
     assert!(
         tools
             .iter()
@@ -1207,7 +1242,7 @@ async fn an_incompatible_project_is_refused_before_any_gate_is_evaluated() {
     for tool in ["status", "artifact_index", "verify"] {
         let input = arguments(json!({
             "schema_version": 1,
-            "project_root": project,
+            "project_root": project.clone(),
         }));
         let result = structured(
             client
@@ -1387,6 +1422,77 @@ async fn unconfigured_public_policy_blocks_before_any_credential_or_lease_is_rea
             .unwrap(),
     );
     assert_eq!(lifted.code, "publishing_unconfigured");
+
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn workspace_backup_barrier_blocks_mcp_mutations_until_released() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let projects = workspace.join("projects");
+    let project = projects.join("demo");
+    let private = workspace.join(".video-studio");
+    let repo = directory.path().join("repo");
+    let state = directory.path().join("runtime-state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&private).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(
+        workspace.join("workspace.json"),
+        r#"{"schema":"video_studio.workspace.v1","workspace_id":"00000000-0000-4000-8000-000000000001"}"#,
+    )
+    .unwrap();
+    write_compatible_contract(&project);
+
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(private.join("workspace-barrier.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = tokio::spawn(async move {
+        service(&repo, &state)
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_transport).await.unwrap();
+    let result = {
+        let call = client.call_tool(
+            CallToolRequestParams::new("record_selection").with_arguments(arguments(json!({
+                "schema_version": 1,
+                "project_root": project.clone(),
+                "cron_run_id": "backup-barrier",
+                "candidate_id": "candidate-1",
+                "chosen_by": "fixture",
+                "chosen_at": 1_795_000_000_u64,
+                "idempotency_key": "selection-after-backup",
+            }))),
+        );
+        tokio::pin!(call);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut call)
+                .await
+                .is_err(),
+            "mutation crossed an exclusive workspace backup barrier"
+        );
+        FileExt::unlock(&lock).unwrap();
+        structured(call.await.unwrap())
+    };
+    assert_eq!(result.code, "selection_recorded");
+    assert!(project.join(".hvp/selection.json").is_file());
 
     client.cancel().await.unwrap();
     server.await.unwrap();

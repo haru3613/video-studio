@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build agent-readable project status for Haru video projects.
+"""Build agent-readable project status for video projects.
 
 This is intentionally file-based: Hermes/OpenClaw can resume from the project
 folder without relying on chat history.
@@ -78,7 +78,7 @@ LANE_CONTRACTS = {
     "tech_longform.v1": {
         "selection_policy": "human_provenance",
         "required_qa_checks": LONGFORM_QA_CHECKS,
-        "production_profile": "haru_tech.v1",
+        "production_profile": "technical_host.v1",
     },
     "manual.v1": {
         "selection_policy": "human_provenance",
@@ -1246,7 +1246,7 @@ def build(project, workspace):
     preview_status = "pass" if preview_validation["ok"] else "missing"
     if editorial_status != "pass":
         next_actions.append(
-            "complete digest-bound B-roll sourcing, Mina identity, and editorial diversity"
+            "complete digest-bound B-roll sourcing, presenter identity, and editorial diversity"
         )
     elif preview_status != "pass":
         next_actions.append("render and review the 60-90 second editorial preview")
@@ -1697,7 +1697,7 @@ def build(project, workspace):
             files=["artifact_manifest.json"] if manifest_path else [],
         ),
         "review_freshness": stage(review_freshness_status),
-        "upload": stage("requires_harvey", notes=["Public upload/schedule/metadata changes require Harvey confirmation."]),
+        "upload": stage("requires_operator_approval", notes=["Public upload/schedule/metadata changes require the operator confirmation."]),
     }
     if segment_status is not None:
         stages["segments"] = stage(
@@ -1871,7 +1871,7 @@ def build(project, workspace):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build Hermes/OpenClaw-readable Haru project status.")
+    parser = argparse.ArgumentParser(description="Build agent-readable project status.")
     parser.add_argument("project", help="Project slug under projects/ or a project path")
     parser.add_argument("--workspace", default=Path(__file__).resolve().parents[1], type=Path)
     parser.add_argument("--write", action="store_true", help="Write pipeline_status.json and artifact_manifest.json")

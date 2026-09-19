@@ -3,11 +3,14 @@ set -eu
 
 : "${YOUTUBE_CHANNEL_ID:?YOUTUBE_CHANNEL_ID is required}"
 : "${YOUTUBE_OAUTH_TOKEN_FILE:?YOUTUBE_OAUTH_TOKEN_FILE is required}"
+: "${VIDEO_STUDIO_JOB_ROOT:?Set the absolute directory containing your local job contract}"
+: "${VIDEO_STUDIO_RETRO_CONTRACT:?Set the contract path relative to VIDEO_STUDIO_JOB_ROOT}"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 as_of_date=$(date -u +%F)
 export YOUTUBE_RETRO_AS_OF_DATE="$as_of_date"
 
 exec python3 "$repo_root/tools/job_contract.py" run \
-  "$repo_root/jobs/retro.json" \
+  "$VIDEO_STUDIO_RETRO_CONTRACT" \
+  --repo-root "$VIDEO_STUDIO_JOB_ROOT" \
   --run-id "retro-$as_of_date"

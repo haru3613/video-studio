@@ -39,6 +39,9 @@ class RenderContractTest(unittest.TestCase):
                 },
             },
         }
+        self.marker["render_input_revision"] = render_contract.render_input_revision(
+            self.project
+        )
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -57,7 +60,9 @@ class RenderContractTest(unittest.TestCase):
         receipt.write_text(json.dumps(self.marker))
         self.assertEqual(render_contract.parse_render_result(receipt)["status"], "pass")
         receipt.write_text("{broken")
-        self.assertEqual(render_contract.parse_render_result(receipt)["status"], "unknown")
+        self.assertEqual(
+            render_contract.parse_render_result(receipt)["status"], "unknown"
+        )
 
     def test_optional_audio_mix_receipt_must_bind_its_assets(self):
         self.marker["mix"]["audio_mix"] = {
@@ -121,10 +126,14 @@ def test_a_render_from_a_superseded_take_is_not_complete(tmp_path):
             "method": "ffmpeg_loudnorm_two_pass",
             "normalization_type": "dynamic",
             "input_sha256": "a" * 64,
-            "target": {"integrated_lufs": -14.0, "true_peak_dbfs": -1.0,
-                       "loudness_range_lu": 3.8},
+            "target": {
+                "integrated_lufs": -14.0,
+                "true_peak_dbfs": -1.0,
+                "loudness_range_lu": 3.8,
+            },
         },
     }
+    marker["render_input_revision"] = render_contract.render_input_revision(project)
     assert render_contract.valid_final_result(project, marker, video) is True
 
     # A new narration take: same video on disk, same marker, different project.
@@ -133,8 +142,9 @@ def test_a_render_from_a_superseded_take_is_not_complete(tmp_path):
 
     # And the same for a re-timed cut.
     narration.write_bytes(b"the take that was rendered")
-    contract.write_text('{"schema": "haru.editorial_contract.v1", "shots": []}',
-                        encoding="utf-8")
+    contract.write_text(
+        '{"schema": "haru.editorial_contract.v1", "shots": []}', encoding="utf-8"
+    )
     assert render_contract.valid_final_result(project, marker, video) is False
 
 
@@ -161,10 +171,14 @@ def test_a_marker_without_those_digests_is_still_judged_on_what_it_has(tmp_path)
             "method": "ffmpeg_loudnorm_two_pass",
             "normalization_type": "dynamic",
             "input_sha256": "a" * 64,
-            "target": {"integrated_lufs": -14.0, "true_peak_dbfs": -1.0,
-                       "loudness_range_lu": 3.8},
+            "target": {
+                "integrated_lufs": -14.0,
+                "true_peak_dbfs": -1.0,
+                "loudness_range_lu": 3.8,
+            },
         },
     }
+    marker["render_input_revision"] = render_contract.render_input_revision(project)
     assert render_contract.valid_final_result(project, marker, video) is True
 
 
@@ -196,13 +210,95 @@ def test_a_current_render_is_never_superseded(tmp_path):
             "method": "ffmpeg_loudnorm_two_pass",
             "normalization_type": "dynamic",
             "input_sha256": "a" * 64,
-            "target": {"integrated_lufs": -14.0, "true_peak_dbfs": -1.0,
-                       "loudness_range_lu": 3.8},
+            "target": {
+                "integrated_lufs": -14.0,
+                "true_peak_dbfs": -1.0,
+                "loudness_range_lu": 3.8,
+            },
         },
     }
+    marker["render_input_revision"] = render_contract.render_input_revision(project)
     assert render_contract.valid_final_result(project, marker, video) is True
     assert render_contract.superseded_final_result(project, marker, video) is False
 
     narration.write_bytes(b"a later take")
     assert render_contract.valid_final_result(project, marker, video) is False
     assert render_contract.superseded_final_result(project, marker, video) is True
+
+
+def test_full_revision_tracks_visual_and_audio_inputs_but_not_generated_state(tmp_path):
+    project = tmp_path / "demo"
+    (project / "remotion/src").mkdir(parents=True)
+    (project / "remotion/node_modules/.cache").mkdir(parents=True)
+    (project / "audio").mkdir()
+    (project / "output").mkdir()
+    (project / "quality-review").mkdir()
+    content = project / "remotion/src/content.json"
+    content.write_text('{"title":"first"}', encoding="utf-8")
+    music = project / "audio/bed.wav"
+    music.write_bytes(b"music-one")
+    initial = render_contract.render_input_revision(project)
+
+    (project / "output/cover.png").write_bytes(b"generated cover")
+    (project / "quality-review/review.json").write_text("{}", encoding="utf-8")
+    (project / "remotion/node_modules/.cache/compiler.bin").write_bytes(b"cache")
+    assert render_contract.render_input_revision(project) == initial
+
+    output_source = project / "output/final-title.json"
+    output_source.write_text('{"title":"input"}', encoding="utf-8")
+    assert render_contract.render_input_revision(project) != initial
+    output_source.unlink()
+    assert render_contract.render_input_revision(project) == initial
+
+    content.write_text('{"title":"second"}', encoding="utf-8")
+    visual_revision = render_contract.render_input_revision(project)
+    assert visual_revision != initial
+    content.write_text('{"title":"first"}', encoding="utf-8")
+    assert render_contract.render_input_revision(project) == initial
+
+    music.write_bytes(b"music-two")
+    assert render_contract.render_input_revision(project) != initial
+
+
+def test_remotion_content_change_makes_a_playable_final_superseded(tmp_path):
+    project = tmp_path / "demo"
+    (project / "remotion/src").mkdir(parents=True)
+    (project / "output").mkdir()
+    content = project / "remotion/src/content.json"
+    content.write_text('{"title":"first"}', encoding="utf-8")
+    video = project / "output/final.mp4"
+    video.write_bytes(b"rendered video")
+    marker = {
+        "schema": "haru.render_result.v1",
+        "status": "render_complete",
+        "render_input_revision": render_contract.render_input_revision(project),
+        "project": "demo",
+        "output": "output/final.mp4",
+        "video_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+        "bytes": video.stat().st_size,
+        "duration_seconds": 10.0,
+        "loudness_lufs": -14.0,
+        "true_peak_dbfs": -2.0,
+        "loudness_range_lu": 3.2,
+        "mix": {
+            "schema": "haru.final_mix.v1",
+            "method": "ffmpeg_loudnorm_two_pass",
+            "normalization_type": "dynamic",
+            "input_sha256": "a" * 64,
+            "target": {
+                "integrated_lufs": -14.0,
+                "true_peak_dbfs": -1.0,
+                "loudness_range_lu": 3.8,
+            },
+        },
+    }
+    assert render_contract.valid_final_result(project, marker, video)
+    content.write_text('{"title":"changed"}', encoding="utf-8")
+    assert not render_contract.valid_final_result(project, marker, video)
+    assert render_contract.superseded_final_result(project, marker, video)
+
+    content.write_text('{"title":"first"}', encoding="utf-8")
+    legacy = dict(marker)
+    legacy.pop("render_input_revision")
+    assert not render_contract.valid_final_result(project, legacy, video)
+    assert render_contract.superseded_final_result(project, legacy, video)

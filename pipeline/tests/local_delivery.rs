@@ -130,6 +130,7 @@ fn export_delivery_requires_a_lease_and_accepts_only_typed_non_publishable_outpu
         project_root: project.clone(),
         lease: LeaseInput::from_lease(&lease),
         idempotency_key: "delivery-once".to_owned(),
+        diagnostic: false,
     };
     let payload = json!({
         "schema": "video_studio.delivery_export.v1",
@@ -170,6 +171,55 @@ fn export_delivery_requires_a_lease_and_accepts_only_typed_non_publishable_outpu
     assert!(unused.calls.is_empty());
 }
 
+#[test]
+fn diagnostic_export_is_typed_and_never_treated_as_delivery_ready() {
+    let directory = tempdir().unwrap();
+    let repo = directory.path().join("repo");
+    let project = directory.path().join("projects/demo");
+    fs::create_dir_all(repo.join("scripts")).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::write(repo.join("scripts/local-delivery"), "#!/bin/sh\n").unwrap();
+    let project = project.canonicalize().unwrap();
+    let lease = ProjectStore::new(&project)
+        .claim_at("agent", Duration::from_secs(60), SystemTime::now())
+        .unwrap();
+    let request = ExportDeliveryRequest {
+        project_root: project.clone(),
+        lease: LeaseInput::from_lease(&lease),
+        idempotency_key: "diagnostic-once".to_owned(),
+        diagnostic: true,
+    };
+    let payload = json!({
+        "schema": "video_studio.diagnostic_export.v1",
+        "project": "demo",
+        "status": "diagnostic_only",
+        "bundle_id": "a".repeat(64),
+        "bundle_path": directory.path().join("diagnostics/demo/bundle"),
+        "reused": false,
+        "delivery_ready": false,
+        "publication_ready": false,
+        "human_approval": false,
+    });
+    let mut executor = FakeExecutor {
+        data: Some(envelope(&project, "diagnostics_exported", payload.clone())),
+        ..FakeExecutor::default()
+    };
+    let result = application::export_delivery(&request, &repo, &mut executor);
+    assert_eq!(result.code, "diagnostics_exported");
+    assert_eq!(executor.calls[0].1.last().unwrap(), "--diagnostic");
+
+    let mut dishonest = payload;
+    dishonest["delivery_ready"] = json!(true);
+    let mut executor = FakeExecutor {
+        data: Some(envelope(&project, "diagnostics_exported", dishonest)),
+        ..FakeExecutor::default()
+    };
+    assert_eq!(
+        application::export_delivery(&request, &repo, &mut executor).code,
+        "command_failed"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn process_executor_forwards_only_runner_specific_trusted_configuration() {
@@ -178,7 +228,7 @@ fn process_executor_forwards_only_runner_specific_trusted_configuration() {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _lock = ENV_LOCK.lock().unwrap();
     let directory = tempdir().unwrap();
-    let script = "#!/bin/sh\nprintf '{\"key\":\"%s\",\"hook\":\"%s\",\"secret\":\"%s\",\"path\":\"%s\",\"chromium\":\"%s\",\"delivery\":\"%s\"}\\n' \"$ELEVENLABS_API_KEY\" \"$BASH_ENV\" \"$TOP_SECRET\" \"$PATH\" \"$VIDEO_STUDIO_CHROMIUM\" \"$VIDEO_STUDIO_DELIVERY_ROOT\"\n";
+    let script = "#!/bin/sh\nprintf '{\"key\":\"%s\",\"hook\":\"%s\",\"secret\":\"%s\",\"path\":\"%s\",\"chromium\":\"%s\",\"delivery\":\"%s\",\"tts_python\":\"%s\",\"spend\":\"%s\",\"home\":\"%s\"}\\n' \"$ELEVENLABS_API_KEY\" \"$BASH_ENV\" \"$TOP_SECRET\" \"$PATH\" \"$VIDEO_STUDIO_CHROMIUM\" \"$VIDEO_STUDIO_DELIVERY_ROOT\" \"$VIDEO_STUDIO_TTS_PYTHON\" \"$VIDEO_STUDIO_TTS_SPEND_JOURNAL\" \"$HOME\"\n";
     let pronunciation = directory.path().join("pronunciation-workflow");
     let render = directory.path().join("render-project");
     let delivery = directory.path().join("local-delivery");
@@ -188,6 +238,13 @@ fn process_executor_forwards_only_runner_specific_trusted_configuration() {
     for path in [&pronunciation, &render, &delivery] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let managed_python = directory
+        .path()
+        .join("home/.local/share/video-studio/python/bin/python");
+    fs::create_dir_all(managed_python.parent().unwrap()).unwrap();
+    fs::write(&managed_python, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&managed_python, fs::Permissions::from_mode(0o755)).unwrap();
+    let original_home = std::env::var_os("HOME");
 
     unsafe {
         std::env::set_var("ELEVENLABS_API_KEY", "provider-secret");
@@ -196,6 +253,8 @@ fn process_executor_forwards_only_runner_specific_trusted_configuration() {
         std::env::set_var("TOP_SECRET", "must-not-leak");
         std::env::set_var("VIDEO_STUDIO_CHROMIUM", "/opt/browser/chromium");
         std::env::set_var("VIDEO_STUDIO_DELIVERY_ROOT", "/tmp/deliveries");
+        std::env::set_var("VIDEO_STUDIO_TTS_SPEND_JOURNAL", "/tmp/tts-spend.json");
+        std::env::set_var("HOME", directory.path().join("home"));
     }
     let mut executor = ProcessExecutor;
     let pronunciation_result = executor.execute(&pronunciation, &[]).unwrap();
@@ -208,12 +267,24 @@ fn process_executor_forwards_only_runner_specific_trusted_configuration() {
         std::env::remove_var("TOP_SECRET");
         std::env::remove_var("VIDEO_STUDIO_CHROMIUM");
         std::env::remove_var("VIDEO_STUDIO_DELIVERY_ROOT");
+        std::env::remove_var("VIDEO_STUDIO_TTS_SPEND_JOURNAL");
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 
     let pronunciation = pronunciation_result.data.unwrap();
     assert_eq!(pronunciation["key"], "provider-secret");
     assert_eq!(pronunciation["hook"], "");
     assert_eq!(pronunciation["secret"], "");
+    assert_eq!(
+        pronunciation["tts_python"],
+        managed_python.to_string_lossy().as_ref()
+    );
+    assert_eq!(pronunciation["spend"], "/tmp/tts-spend.json");
+    assert_eq!(pronunciation["home"], "");
     assert_eq!(
         pronunciation["path"],
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -224,6 +295,9 @@ fn process_executor_forwards_only_runner_specific_trusted_configuration() {
     assert_eq!(render["secret"], "");
     assert_eq!(render["chromium"], "/opt/browser/chromium");
     assert_eq!(render["delivery"], "");
+    assert_eq!(render["tts_python"], "");
+    assert_eq!(render["spend"], "");
+    assert_eq!(render["home"], "");
     let delivery = delivery_result.data.unwrap();
     assert_eq!(delivery["key"], "");
     assert_eq!(delivery["delivery"], "/tmp/deliveries");

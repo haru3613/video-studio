@@ -10,7 +10,8 @@ resource_url = "https://studio.example.com/mcp"
 allowed_origins = ["https://studio.example.com"]
 # Add the proxy's Host value only when it differs from resource_url.
 allowed_hosts = []
-max_request_body_size = 1048576
+# Leaves protocol/JSON overhead around the separately enforced 1 MiB inline-text limit.
+max_request_body_size = 2097152
 session_idle_timeout_seconds = 900
 max_sessions = 100
 
@@ -26,6 +27,7 @@ jwks_max_bytes = 262144
 clock_skew_seconds = 30
 
 [paths]
-# This directory must already contain a real, non-symlink `projects/`
-# directory. Requests cannot switch workspaces.
+# Initialize this directory with `scripts/init-workspace`. It must contain
+# direct workspace.json, projects/, inbox/, and .video-studio/ entries.
+# Requests cannot switch workspaces.
 workspace_root = "/srv/video-studio/workspace"

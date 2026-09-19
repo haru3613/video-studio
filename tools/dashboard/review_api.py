@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 import json
 import math
@@ -11,7 +10,6 @@ import re
 import secrets
 import shutil
 import subprocess
-import uuid
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
 
@@ -20,15 +18,16 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 try:
     from .review_store import ReviewStore
+    from . import review_domain
 except ImportError:  # server.py is also run directly from tools/dashboard
     from review_store import ReviewStore
+    import review_domain
 
 
 PACKAGE_SCHEMA = "haru.review_package.v1"
 MAX_JSON_BYTES = 1024 * 1024
 MAX_WRITE_BYTES = 64 * 1024
 MAX_ASSETS = 100
-MAX_COMMENTS_BODY = 5000
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
@@ -409,7 +408,16 @@ def _snapshot_path(snapshot, roots: dict[str, Path]) -> Path:
         raise ValueError("invalid asset snapshot")
     kind = snapshot.get("kind")
     root = _project_root(snapshot.get("source"), snapshot.get("project"), roots)
-    return _asset_path(root, snapshot.get("path"), kind)
+    path = _asset_path(root, snapshot.get("path"), kind)
+    checksum, size = _sha256(path)
+    if checksum == snapshot.get("sha256") and size == snapshot.get("bytes"):
+        return path
+    if kind == "video" and snapshot.get("path") == "output/final.mp4":
+        from version_archive import archived_video
+        archived = archived_video(root, snapshot.get("sha256"), snapshot.get("bytes"))
+        if archived is not None:
+            return archived
+    return path
 
 
 async def _json_request(request: Request, exact_keys: set[str]) -> dict:
@@ -450,23 +458,6 @@ def _require_write_auth(request: Request, token: str) -> None:
         raise _error(403, "invalid CSRF token")
 
 
-def _public_comment(comment: dict) -> dict:
-    return {key: value for key, value in comment.items() if not key.startswith("_")}
-
-
-def _validate_timestamp(value, asset: dict) -> float | None:
-    if asset["kind"] == "cover":
-        if value is not None:
-            raise _error(422, "cover comments require a null timestamp")
-        return None
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
-        raise _error(422, "timestamp must be finite")
-    duration = asset.get("duration_seconds")
-    if duration is None or value < 0 or value > duration:
-        raise _error(422, "timestamp is outside the asset duration")
-    return float(value)
-
-
 def _format_time(value) -> str:
     if value is None:
         return "cover"
@@ -503,7 +494,7 @@ def register_review_routes(app: FastAPI, roots: dict[str, Path], storage_root: P
     @app.get("/api/review/{source}/{project}")
     def get_review(source: str, project: str):
         review, _ = _build_review(source, project, normalized_roots, token, storage)
-        review["comments"] = [_public_comment(comment) for comment in review["comments"]]
+        review["comments"] = [review_domain.public_comment(comment) for comment in review["comments"]]
         return review
 
     @app.post("/api/review/{source}/{project}/comments", status_code=201)
@@ -513,97 +504,40 @@ def register_review_routes(app: FastAPI, roots: dict[str, Path], storage_root: P
             request,
             {"client_id", "package_id", "asset_id", "asset_sha256", "timestamp_seconds", "body"},
         )
-        try:
-            uuid.UUID(payload["client_id"])
-        except (AttributeError, TypeError, ValueError):
-            raise _error(422, "client_id must be a UUID")
-        body = payload["body"]
-        if not isinstance(body, str) or not body.strip() or len(body) > MAX_COMMENTS_BODY:
-            raise _error(422, "comment body must contain 1 to 5000 characters")
         review, store = _build_review(source, project, normalized_roots, token, storage)
-        existing = next(
-            (item for item in store.read_comments() if item.get("client_id") == payload["client_id"]),
-            None,
-        )
-        if existing is not None:
-            same = (
-                existing.get("package_id") == payload["package_id"]
-                and existing.get("asset", {}).get("id") == payload["asset_id"]
-                and existing.get("asset", {}).get("sha256") == payload["asset_sha256"]
-                and existing.get("timestamp_seconds") == payload["timestamp_seconds"]
-                and existing.get("body") == body.strip()
+
+        def load_current(include_durations: bool):
+            value, _ = _build_review(
+                source,
+                project,
+                normalized_roots,
+                token,
+                storage,
+                include_comments=False,
+                include_durations=include_durations,
             )
-            if not same:
-                raise _error(409, "client_id was already used with different content")
-            return {"comment": _public_comment(existing)}
-        if payload["package_id"] != review["package_id"]:
-            raise _error(409, "review package changed")
-        asset = next((item for item in review["assets"] if item["id"] == payload["asset_id"]), None)
-        if asset is None or asset["sha256"] is None or payload["asset_sha256"] != asset["sha256"]:
+            return value
+
+        def fingerprint(snapshot):
+            try:
+                return _sha256(_snapshot_path(snapshot, normalized_roots))
+            except (HTTPException, ValueError, TypeError):
+                return None, 0
+
+        try:
+            comment, _code, _package_id = review_domain.add_comment(
+                store,
+                payload,
+                load_current=load_current,
+                snapshot_fingerprint=fingerprint,
+            )
+        except review_domain.ReviewDomainError as exc:
+            if exc.code in {"invalid_input", "invalid_timestamp"}:
+                raise _error(422, "comment fields are invalid")
+            if exc.code == "review_conflict":
+                raise _error(409, "review package or client id changed")
             raise _error(409, "review asset changed")
-        timestamp = _validate_timestamp(payload["timestamp_seconds"], asset)
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        snapshot_keys = ("id", "kind", "label", "source", "project", "path", "sha256", "bytes", "url")
-        snapshot = {key: asset[key] for key in snapshot_keys}
-
-        def add(comments):
-            existing = next((item for item in comments if item.get("client_id") == payload["client_id"]), None)
-            if existing is not None:
-                same = (
-                    existing.get("package_id") == payload["package_id"]
-                    and existing.get("asset", {}).get("id") == payload["asset_id"]
-                    and existing.get("asset", {}).get("sha256") == payload["asset_sha256"]
-                    and existing.get("timestamp_seconds") == timestamp
-                    and existing.get("body") == body.strip()
-                )
-                if not same:
-                    raise _error(409, "client_id was already used with different content")
-                return existing
-            try:
-                latest, _ = _build_review(
-                    source,
-                    project,
-                    normalized_roots,
-                    token,
-                    storage,
-                    include_comments=False,
-                    include_durations=False,
-                )
-            except (HTTPException, RuntimeError):
-                raise _error(409, "review package changed")
-            latest_asset = next(
-                (item for item in latest["assets"] if item["id"] == payload["asset_id"]),
-                None,
-            )
-            if (
-                latest["package_id"] != payload["package_id"]
-                or latest_asset is None
-                or latest_asset["sha256"] != payload["asset_sha256"]
-            ):
-                raise _error(409, "review package changed")
-            try:
-                current_path = _snapshot_path(snapshot, normalized_roots)
-            except (HTTPException, ValueError):
-                raise _error(409, "review asset changed")
-            current_digest, current_size = _sha256(current_path)
-            if current_digest != snapshot["sha256"] or current_size != snapshot["bytes"]:
-                raise _error(409, "review asset changed")
-            comment = {
-                "id": str(uuid.uuid4()),
-                "client_id": payload["client_id"],
-                "package_id": payload["package_id"],
-                "asset": snapshot,
-                "timestamp_seconds": timestamp,
-                "body": body.strip(),
-                "status": "open",
-                "created_at": now,
-                "updated_at": now,
-            }
-            comments.append(comment)
-            return comment
-
-        comment = store.update(add)
-        return {"comment": _public_comment(comment)}
+        return {"comment": review_domain.public_comment(comment)}
 
     @app.patch("/api/review/{source}/{project}/comments/{comment_id}")
     async def update_comment(source: str, project: str, comment_id: str, request: Request):
@@ -611,23 +545,50 @@ def register_review_routes(app: FastAPI, roots: dict[str, Path], storage_root: P
         payload = await _json_request(request, {"status"})
         if payload["status"] not in {"open", "resolved"}:
             raise _error(422, "invalid comment status")
-        try:
-            uuid.UUID(comment_id)
-        except ValueError:
-            raise _error(404, "comment not found")
         requested_root = _project_root(source, project, normalized_roots)
         store = ReviewStore(requested_root, storage)
+        current, _ = _build_review(source, project, normalized_roots, token, storage)
+        existing = next(
+            (item for item in current["comments"] if item.get("id") == comment_id), None
+        )
+        if existing is None:
+            raise _error(404, "comment not found")
 
-        def patch(comments):
-            comment = next((item for item in comments if item.get("id") == comment_id), None)
-            if comment is None:
+        def load_current(include_durations: bool):
+            value, _ = _build_review(
+                source,
+                project,
+                normalized_roots,
+                token,
+                storage,
+                include_comments=False,
+                include_durations=include_durations,
+            )
+            return value
+
+        def fingerprint(snapshot):
+            try:
+                return _sha256(_snapshot_path(snapshot, normalized_roots))
+            except (HTTPException, ValueError, TypeError):
+                return None, 0
+
+        try:
+            comment, _code, _package_id = review_domain.resolve_comment(
+                store,
+                comment_id=comment_id,
+                status=payload["status"],
+                expected_package_id=current["package_id"],
+                expected_asset_sha256=existing["asset"]["sha256"],
+                load_current=load_current,
+                snapshot_fingerprint=fingerprint,
+            )
+        except review_domain.ReviewDomainError as exc:
+            if exc.code == "comment_not_found":
                 raise _error(404, "comment not found")
-            if comment.get("status") != payload["status"]:
-                comment["status"] = payload["status"]
-                comment["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-            return comment
-
-        return {"comment": _public_comment(store.update(patch))}
+            if exc.code == "invalid_input":
+                raise _error(422, "invalid comment status")
+            raise _error(409, "review asset changed")
+        return {"comment": review_domain.public_comment(comment)}
 
     @app.get("/api/review/{source}/{project}/export")
     def export_comments(source: str, project: str):

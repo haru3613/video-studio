@@ -22,9 +22,11 @@ const TEST_CHANNEL: &str = "UCaaaaaaaaaaaaaaaaaaaaaa";
 /// Every tool name this build serves. The self-eval gate is an action on
 /// `visual_qa` and a runner on `run_next`, so it adds no self-eval tool.
 /// Human publish confirmation has its own read-only preparation entry point.
-const TOOL_SURFACE: [&str; 28] = [
+const TOOL_SURFACE: [&str; 34] = [
     "approve_publish",
+    "artifact_import",
     "artifact_index",
+    "artifact_stage",
     "create",
     "delivery_status",
     "export_delivery",
@@ -39,11 +41,14 @@ const TOOL_SURFACE: [&str; 28] = [
     "prepare_publish",
     "prepare_publish_approval",
     "produce_artifact",
+    "produce_staged_artifact",
+    "project_list",
     "pronunciation_review",
     "publish",
     "reconcile_upload",
     "record_selection",
     "replace_thumbnail",
+    "review_add",
     "review_feedback",
     "review_resolve",
     "run_next",
@@ -51,6 +56,7 @@ const TOOL_SURFACE: [&str; 28] = [
     "status",
     "verify",
     "visual_qa",
+    "workspace_info",
 ];
 
 fn arguments(value: Value) -> serde_json::Map<String, Value> {

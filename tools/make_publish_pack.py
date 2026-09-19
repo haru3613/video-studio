@@ -126,7 +126,7 @@ def build_pack(project, workspace):
         "",
         "## Upload Gate",
         "",
-        "- Public upload, scheduling, and metadata changes require Harvey confirmation.",
+        "- Public upload, scheduling, and metadata changes require the operator confirmation.",
         "- Do not publish if source-lock warnings remain unresolved.",
     ]
     if warnings:
@@ -163,7 +163,7 @@ def write_pack(project, pack):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create a Haru YouTube publish pack.")
+    parser = argparse.ArgumentParser(description="Create a YouTube publish pack.")
     parser.add_argument("project", help="Project slug under projects/ or a project path")
     parser.add_argument("--workspace", default=Path(__file__).resolve().parents[1], type=Path)
     parser.add_argument("--write", action="store_true")

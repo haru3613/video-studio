@@ -74,7 +74,7 @@ def require_editorial_profile(project):
             {
                 "schema": "haru.project_contract.v1",
                 "lane_contract": "social_issue_longform.v1",
-                "production_profile": "mina_longform.v1",
+                "production_profile": "host_longform.v1",
                 "publish_target": {
                     "youtube_channel_id": "UCaaaaaaaaaaaaaaaaaaaaaa"
                 },

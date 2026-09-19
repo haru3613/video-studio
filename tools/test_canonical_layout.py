@@ -117,23 +117,23 @@ class CanonicalLayoutTest(RuntimePolicyCase):
 
     def test_a_lane_that_names_a_presenter_pins_it(self):
         """Each presenter lane accepts only its own profile, and every lane rejects junk."""
-        self.assertTrue(self.contract_is_accepted("social_issue_longform.v1", "mina_longform.v1"))
-        self.assertTrue(self.contract_is_accepted("tech_longform.v1", "haru_tech.v1"))
+        self.assertTrue(self.contract_is_accepted("social_issue_longform.v1", "host_longform.v1"))
+        self.assertTrue(self.contract_is_accepted("tech_longform.v1", "technical_host.v1"))
 
         # Crossing the two is the mistake worth catching: both halves are individually
         # valid, so nothing else in the pipeline would notice.
-        self.assertFalse(self.contract_is_accepted("social_issue_longform.v1", "haru_tech.v1"))
-        self.assertFalse(self.contract_is_accepted("tech_longform.v1", "mina_longform.v1"))
+        self.assertFalse(self.contract_is_accepted("social_issue_longform.v1", "technical_host.v1"))
+        self.assertFalse(self.contract_is_accepted("tech_longform.v1", "host_longform.v1"))
 
         self.assertFalse(self.contract_is_accepted("tech_longform.v1", None))
-        self.assertFalse(self.contract_is_accepted("not_a_lane.v1", "haru_tech.v1"))
+        self.assertFalse(self.contract_is_accepted("not_a_lane.v1", "technical_host.v1"))
 
     def test_the_manual_lane_must_not_claim_a_presenter(self):
         """Only pinned lanes are gated at render, so a manual project carrying a
         profile would read as presenter-bound while skipping the editorial gate."""
         self.assertTrue(self.contract_is_accepted("manual.v1", None))
-        self.assertFalse(self.contract_is_accepted("manual.v1", "haru_tech.v1"))
-        self.assertFalse(self.contract_is_accepted("manual.v1", "mina_longform.v1"))
+        self.assertFalse(self.contract_is_accepted("manual.v1", "technical_host.v1"))
+        self.assertFalse(self.contract_is_accepted("manual.v1", "host_longform.v1"))
 
     def test_every_pinned_lane_pins_a_profile_the_contract_validator_knows(self):
         """A lane pinned to a profile no validator recognises would fail closed forever."""

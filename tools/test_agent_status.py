@@ -17,6 +17,7 @@ import agent_status
 import canonical_layout
 import final_quality_authority
 import render_self_eval
+import render_contract
 import self_eval_fixture
 import visual_qa_sample
 
@@ -168,6 +169,14 @@ def record_final_quality_fixture(project):
         final_quality_authority._record(project,
             {key: entry(name) for key, name in final_quality_authority.INPUT_PATHS.items()},
             {key: entry(name) for key, name in final_quality_authority.OUTPUT_PATHS.items()})
+
+
+def bind_render_revision(project):
+    revision = render_contract.render_input_revision(project)
+    for marker in (project / "output").glob("*.mp4.render-result"):
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        value["render_input_revision"] = revision
+        marker.write_text(json.dumps(value), encoding="utf-8")
 
 
 def make_ready_project(root, slug="demo", self_eval_status="pass", self_eval_attempt=1):
@@ -347,10 +356,6 @@ callback tail
         ),
         encoding="utf-8",
     )
-    seal_self_eval(
-        project, root, status=self_eval_status, attempt=self_eval_attempt
-    )
-    write_visual_qa_receipts(project, video)
     write_png(project / "output" / "cover.png")
     (project / "publish-metadata.json").write_text(
         json.dumps(
@@ -394,6 +399,11 @@ callback tail
         ),
         encoding="utf-8",
     )
+    bind_render_revision(project)
+    seal_self_eval(
+        project, root, status=self_eval_status, attempt=self_eval_attempt
+    )
+    write_visual_qa_receipts(project, video)
     return project
 
 
@@ -401,7 +411,7 @@ def write_mina_editorial_fixture(project):
     project_contract_path = project / "project-contract.json"
     project_contract = json.loads(project_contract_path.read_text(encoding="utf-8"))
     project_contract["lane_contract"] = "social_issue_longform.v1"
-    project_contract["production_profile"] = "mina_longform.v1"
+    project_contract["production_profile"] = "host_longform.v1"
     project_contract_path.write_text(
         json.dumps(project_contract), encoding="utf-8"
     )
@@ -456,12 +466,12 @@ def write_mina_editorial_fixture(project):
     contract = {
         "schema": "haru.editorial_contract.v1",
         "project": project.name,
-        "production_profile": "mina_longform.v1",
+        "production_profile": "host_longform.v1",
         "storyboard_sha256": hashlib.sha256(storyboard.read_bytes()).hexdigest(),
         "shots": [
-            {"event_id": "host-open", "start_seconds": 0, "end_seconds": 10.8, "composition": "aroll_full", "asset_role": "mina_aroll", "presenter_id": "mina", "asset_path": "assets/mina.mp4", "asset_sha256": hashlib.sha256(paths["mina.mp4"].read_bytes()).hexdigest()},
+            {"event_id": "host-open", "start_seconds": 0, "end_seconds": 10.8, "composition": "aroll_full", "asset_role": "host_aroll", "presenter_id": "host", "asset_path": "assets/mina.mp4", "asset_sha256": hashlib.sha256(paths["mina.mp4"].read_bytes()).hexdigest()},
             {"event_id": "evidence", "start_seconds": 10.8, "end_seconds": 30, "composition": "broll_full", "asset_role": "broll", "asset_path": "assets/broll.mp4", "asset_sha256": hashlib.sha256(paths["broll.mp4"].read_bytes()).hexdigest(), "source_receipt_path": "assets/broll.mp4.source.json", "source_receipt_sha256": hashlib.sha256(broll_receipt.read_bytes()).hexdigest()},
-            {"event_id": "evidence-pip", "start_seconds": 30, "end_seconds": 42, "composition": "broll_pip", "asset_role": "broll", "asset_path": "assets/broll.mp4", "asset_sha256": hashlib.sha256(paths["broll.mp4"].read_bytes()).hexdigest(), "source_receipt_path": "assets/broll.mp4.source.json", "source_receipt_sha256": hashlib.sha256(broll_receipt.read_bytes()).hexdigest(), "presenter_id": "mina", "presenter_asset_path": "assets/mina.mp4", "presenter_asset_sha256": hashlib.sha256(paths["mina.mp4"].read_bytes()).hexdigest()},
+            {"event_id": "evidence-pip", "start_seconds": 30, "end_seconds": 42, "composition": "broll_pip", "asset_role": "broll", "asset_path": "assets/broll.mp4", "asset_sha256": hashlib.sha256(paths["broll.mp4"].read_bytes()).hexdigest(), "source_receipt_path": "assets/broll.mp4.source.json", "source_receipt_sha256": hashlib.sha256(broll_receipt.read_bytes()).hexdigest(), "presenter_id": "host", "presenter_asset_path": "assets/mina.mp4", "presenter_asset_sha256": hashlib.sha256(paths["mina.mp4"].read_bytes()).hexdigest()},
             {"event_id": "system-motion", "start_seconds": 42, "end_seconds": 60, "composition": "motion_graphics", "asset_role": "motion_canvas", "asset_path": "assets/motion.mp4", "asset_sha256": hashlib.sha256(paths["motion.mp4"].read_bytes()).hexdigest(), "engine": "motion_canvas", "producer_receipt_path": "assets/motion.mp4.motion-canvas.json", "producer_receipt_sha256": hashlib.sha256(motion_receipt.read_bytes()).hexdigest()},
         ],
     }
@@ -491,6 +501,7 @@ def write_mina_editorial_fixture(project):
         value = json.loads(marker.read_text(encoding="utf-8"))
         value["editorial_contract_sha256"] = editorial_digest
         marker.write_text(json.dumps(value), encoding="utf-8")
+    bind_render_revision(project)
     # Adding the editorial contract and rebinding the marker changes the self-eval
     # identity, so the attempt sealed by make_ready_project is now history. Seal
     # the new identity before rewriting the v2 receipts that bind it.

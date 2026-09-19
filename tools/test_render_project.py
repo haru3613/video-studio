@@ -180,27 +180,40 @@ printf '%s\\n' "$@" > "$3.args"
         for path, frequency in ((bgm, 220), (effect, 880)):
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000:duration=1",
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"sine=frequency={frequency}:sample_rate=48000:duration=1",
                     str(path),
                 ],
                 check=True,
             )
-        (self.project / "render_plan.json").write_text(json.dumps({
-            "schema": "haru.render_plan.v1",
-            "engine": "remotion",
-            "remotion_dir": "remotion",
-            "composition": "HvpSmoke",
-            "output": "output/final.mp4",
-            "expected_duration": 1,
-            "concurrency": 1,
-            "skip_pronunciation_gate": True,
-            "audio_mix": {
-                "schema": "haru.audio_mix.v1",
-                "background_music": {"path": "audio/bgm.wav", "gain_db": -30},
-                "sound_effects": [{"path": "audio/effect.wav", "start_seconds": 0.25}],
-            },
-        }))
+        (self.project / "render_plan.json").write_text(
+            json.dumps(
+                {
+                    "schema": "haru.render_plan.v1",
+                    "engine": "remotion",
+                    "remotion_dir": "remotion",
+                    "composition": "HvpSmoke",
+                    "output": "output/final.mp4",
+                    "expected_duration": 1,
+                    "concurrency": 1,
+                    "skip_pronunciation_gate": True,
+                    "audio_mix": {
+                        "schema": "haru.audio_mix.v1",
+                        "background_music": {"path": "audio/bgm.wav", "gain_db": -30},
+                        "sound_effects": [
+                            {"path": "audio/effect.wav", "start_seconds": 0.25}
+                        ],
+                    },
+                }
+            )
+        )
 
         result = self.invoke()
 
@@ -318,6 +331,7 @@ ffmpeg -y -hide_banner -loglevel error \
             "segment_plan.py",
             "segment_render.py",
             "template_trust.py",
+            "workspace_barrier.py",
         ):
             shutil.copy2(ROOT / "tools" / name, copied_repo / "tools" / name)
         mixer = copied_repo / "tools/mix_final.py"
@@ -466,7 +480,9 @@ print(json.dumps({
         result = self.invoke()
 
         self.assertEqual(result.returncode, 3)
-        self.assertEqual(json.loads(result.stdout)["code"], "pronunciation_review_stale")
+        self.assertEqual(
+            json.loads(result.stdout)["code"], "pronunciation_review_stale"
+        )
         self.assertFalse((self.output / "final.mp4").exists())
 
     def test_social_longform_render_is_blocked_without_required_profile(self):
@@ -512,7 +528,8 @@ print(json.dumps({
         import editorial_contract
 
         pinned = [
-            lane for lane, profile in editorial_contract.LANE_PROFILES.items()
+            lane
+            for lane, profile in editorial_contract.LANE_PROFILES.items()
             if profile is not None
         ]
         self.assertTrue(pinned, "no presenter lanes declared")
@@ -558,7 +575,7 @@ print(json.dumps({
                 {
                     "schema": "haru.project_contract.v1",
                     "lane_contract": "social_issue_longform.v1",
-                    "production_profile": "mina_longform.v1",
+                    "production_profile": "host_longform.v1",
                 }
             )
         )
@@ -571,10 +588,26 @@ print(json.dumps({
                     "scenes": [
                         {
                             "visual_events": [
-                                {"event_id": "host-open", "start_seconds": 0, "end_seconds": 10.8},
-                                {"event_id": "evidence", "start_seconds": 10.8, "end_seconds": 30},
-                                {"event_id": "evidence-pip", "start_seconds": 30, "end_seconds": 42},
-                                {"event_id": "system-motion", "start_seconds": 42, "end_seconds": 60},
+                                {
+                                    "event_id": "host-open",
+                                    "start_seconds": 0,
+                                    "end_seconds": 10.8,
+                                },
+                                {
+                                    "event_id": "evidence",
+                                    "start_seconds": 10.8,
+                                    "end_seconds": 30,
+                                },
+                                {
+                                    "event_id": "evidence-pip",
+                                    "start_seconds": 30,
+                                    "end_seconds": 42,
+                                },
+                                {
+                                    "event_id": "system-motion",
+                                    "start_seconds": 42,
+                                    "end_seconds": 60,
+                                },
                             ]
                         }
                     ],

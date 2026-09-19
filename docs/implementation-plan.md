@@ -1,6 +1,8 @@
 # Video Studio 功能實作計畫
 
-日期：2026-09-19。狀態：可供實作拆分與審閱的設計提案，尚未實作。
+日期：2026-09-19；範圍校準：2026-09-20。狀態：實作中，尚未完成發布驗收。
+
+使用者後續授權「直接全部做完」，並明確要求「基本上是複製我們既有的功能工作流」。因此保留既有 20 個本機 MCP workflow 的相容程式（含進階發布與簽章），以未配置頻道／signer、upload hold 和人工核准關卡維持預設禁用；HTTP 不提供發布。這取代本提案原本「完全不匯入發布程式」的範圍。原始 artifact schema 保留相容性，主持人／操作者政策改為通用角色，沒有攜入品牌身份與素材。
 
 **已確認的產品方向**
 
@@ -38,9 +40,9 @@ Video Studio 是使用者自行安裝的影片工作流軟體。提供兩種完�
 | 審片 | 版本、播放、時間點回饋、回饋匯出 | A/B、封面比較、多人遠端審片、剪輯時間線 |
 | 輸出 | 成片、SRT、封面、交付 manifest | YouTube 等平台發布 adapter |
 | 部署 | macOS arm64 本機＋Ubuntu 24.04 LTS x86_64（S1 確認相依）；source install | 已驗證的 Windows／Linux arm64、預編譯發行品、Docker image |
-| 發布 | `publish=unsupported`，沒有上傳端點和憑證讀取路徑 | 使用者自備 OAuth、正式核准與去重上傳 |
+| 發布 | 保留本機相容程式；預設 `publishing_unconfigured`，HTTP 不暴露發布工具，未配置前不讀取憑證 | 使用者明確配置 OAuth／signer／頻道並自行驗證；不由專案維護者啟用 |
 
-v0.1 的技術 QA 和本機回饋不宣稱為原 Haru 系統的硬體簽章核准。匯出是本機交付操作，不是平台發布。原系統的核准規則保持原樣，不能把它的 `pass` 改成較弱的意思。
+v0.1 的技術 QA 和本機回饋不宣稱為原系統的硬體簽章核准。匯出是本機交付操作，不是平台發布。原系統的核准規則保持原樣，不能把它的 `pass` 改成較弱的意思。
 
 **架構：兩個入口共用一套行為**
 
@@ -218,7 +220,7 @@ v0.1 先提供 source install，精確版本的 Rust build、Python isolated env
 | Media tools `narration/stt_align.py` | 拆純 retiming 與 network adapter | `test_stt_align.py`；fixture 來源須另行審核／替換 |
 | Media tools sectioned narration／providers | 拆 sections/cache/stitch 與可選 ElevenLabs；移除聲音／預算／key 預設 | sectioned narration、TTS gates、provider tests；補真實 bounded smoke |
 | Media tools cover generator | 重做中性模板，採可配置 browser／同一 renderer 產生 still | escape／文字縮放 tests；補 macOS/Linux 實際 PNG |
-| G2PW、voice rules、Haru assets、真實專案、vendored skills、發布 signer | 不匯入 v0.1 | 另需模型／素材授權與功能需求決策 |
+| G2PW 權重、voice rules、品牌素材、真實專案、vendored skills、既有發布 signer 身份 | 不匯入 v0.1 | 另需模型／素材授權與功能需求決策 |
 
 每批 import 用 reviewed allowlist，新增 `SOURCE_PROVENANCE` 與必要 notices。不能因程式在私人 repo 裡就假定全部有權再授權；原程式需要原本不存在的 private data 時，做中性替代 fixture。先沿用 Rust／Python／Node 組合與單 repo，不為只有一個實作的部位先設計通用 plugin registry。
 
@@ -265,7 +267,7 @@ CI 的 PR 流程只跑無費用測試與短 fixture render，禁止自動付費 
 
 **後續功能與發布邊界**
 
-v0.2 可交付 S5、音訊 A/B、封面比較，並評估多 provider、G2P、可選素材搜尋／生成、長片段落快取、Docker／預編譯發行品；需要先確認需求與可再散布相依。YouTube 發布另開完整交付：自備 OAuth／頻道驗證、可信任人類核准、版本綁定、upload hold、重送去重、回查與取消，不從普通網頁留言或 CLI `--yes` 推導授權。
+v0.2 可交付 S5、音訊 A/B、封面比較，並評估多 provider、G2P、可選素材搜尋／生成、長片段落快取、Docker／預編譯發行品；需要先確認需求與可再散布相依。保留的 YouTube 程式若要宣告支援真實帳號，仍需另作完整服務驗收：自備 OAuth／頻道驗證、可信任人類核准、版本綁定、upload hold、重送去重、回查與取消，不從普通網頁留言或 CLI `--yes` 推導授權。
 
 待維護者決定的是 LICENSE 與權利人、可公開示例素材，以及正式公開／release 時點；不是日常技術工作的逐項批准。第一版入口、無雲端定位和自架 HTTP 範圍已確定，不再當成未決策問題。
 

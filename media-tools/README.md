@@ -24,8 +24,11 @@ export VIDEO_STUDIO_TTS_MAX_CREDITS=5000
 ```
 
 `ELEVENLABS_API_KEY` may be used instead of the file path. Never configure
-both. `--force-budget` is the explicit per-run bypass used by the Studio only
-after its own approved request has bounded the cost.
+both. Every paid request requires a credit cap. When both CLI and environment
+limits are provided, the smaller limit applies. `--force-budget` is retained
+only for caller compatibility and never bypasses that cap. A persistent spend
+journal prevents ambiguous provider outcomes from being retried and charged
+again; see [SPEND_JOURNAL.md](narration/SPEND_JOURNAL.md).
 
 Thumbnail rendering requires a subject image directory and Chrome/Chromium:
 

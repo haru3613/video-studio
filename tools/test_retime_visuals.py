@@ -80,7 +80,7 @@ def _project(root, *, cue_shift=0.0):
     }, ensure_ascii=False), encoding="utf-8")
     (project / "editorial-contract.json").write_text(json.dumps({
         "schema": "haru.editorial_contract.v1", "project": "demo",
-        "production_profile": "mina_longform.v1", "storyboard_sha256": "stale",
+        "production_profile": "host_longform.v1", "storyboard_sha256": "stale",
         "shots": [
             {"event_id": "ev-one", "start_seconds": 99.0, "end_seconds": 99.5,
              "asset_path": "a.mp4", "composition": "broll_full"},

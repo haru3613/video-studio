@@ -6,7 +6,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -17,6 +19,102 @@ import canonical_layout  # noqa: E402
 
 RENDER_SCHEMA = "haru.render_result.v1"
 MIX_SCHEMA = "haru.final_mix.v1"
+RENDER_INPUT_REVISION_FIELD = "render_input_revision"
+GENERATED_RENDER_OUTPUTS = {
+    "output/cover.png",
+    "output/final.mp4",
+    "output/final.mp4.render-result",
+    "output/final.mp4.render.log",
+    "output/final.mp4.rendering",
+    "output/final.pre-loudnorm.mp4",
+    "output/final.pre-loudnorm.raw.mp4",
+    "output/render.log",
+}
+
+
+def _generated_cache(relative: str) -> bool:
+    parts = relative.split("/")
+    return (
+        any(
+            parts[index : index + 2] == ["node_modules", ".cache"]
+            for index in range(len(parts) - 1)
+        )
+        or "__pycache__" in parts
+    )
+
+
+def _revision_excluded(relative: str) -> bool:
+    parts = relative.split("/") if relative else []
+    return bool(
+        _generated_cache(relative)
+        or (parts and parts[0] in {".hvp", "quality-review", "publish"})
+        or relative == "output/.staging"
+        or relative.startswith("output/.staging/")
+        or relative == "output/versions"
+        or relative.startswith("output/versions/")
+        or relative == "output/archive"
+        or relative.startswith("output/archive/")
+        or relative == "output/superseded"
+        or relative.startswith("output/superseded/")
+        or relative in GENERATED_RENDER_OUTPUTS
+        or relative
+        in {
+            "artifact_manifest.json",
+            "pipeline_status.json",
+            "youtube-publish-pack.md",
+        }
+        or ".superseded-" in relative
+    )
+
+
+def render_input_revision(project_value: Path) -> str:
+    """Digest every render-relevant project byte and path deterministically."""
+
+    project = Path(project_value)
+    if project.is_symlink() or not project.is_dir():
+        raise ValueError("project")
+    project = project.resolve(strict=True)
+    digest = hashlib.sha256()
+    for current, directories, files in os.walk(project, followlinks=False):
+        current_path = Path(current)
+        relative_root = (
+            current_path.relative_to(project).as_posix()
+            if current_path != project
+            else ""
+        )
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not _revision_excluded("/".join(filter(None, (relative_root, name))))
+        )
+        for name in sorted([*directories, *files]):
+            path = current_path / name
+            relative = "/".join(filter(None, (relative_root, name)))
+            if _revision_excluded(relative):
+                continue
+            metadata = path.lstat()
+            digest.update(relative.encode("utf-8") + b"\0")
+            if stat.S_ISLNK(metadata.st_mode):
+                target = os.readlink(path)
+                if os.path.isabs(target):
+                    raise ValueError("absolute input symlink")
+                try:
+                    path.resolve(strict=True).relative_to(project)
+                except (OSError, RuntimeError, ValueError) as error:
+                    raise ValueError("escaping input symlink") from error
+                digest.update(b"l" + target.encode("utf-8") + b"\0")
+            elif stat.S_ISDIR(metadata.st_mode):
+                digest.update(b"d\0")
+            elif stat.S_ISREG(metadata.st_mode):
+                digest.update(
+                    b"f" + str(metadata.st_mode & 0o777).encode("ascii") + b"\0"
+                )
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            else:
+                raise ValueError("special render input")
+    return digest.hexdigest()
 
 
 def sha256(path: Path) -> str:
@@ -201,6 +299,16 @@ def describes_current_inputs(project: Path, marker) -> bool:
     """
     if assembly_binding_state(project, marker) != "current":
         return False
+    recorded_revision = (
+        marker.get(RENDER_INPUT_REVISION_FIELD) if isinstance(marker, dict) else None
+    )
+    if not valid_sha256(recorded_revision, lowercase=True):
+        return False
+    try:
+        if recorded_revision != render_input_revision(project):
+            return False
+    except (OSError, ValueError):
+        return False
     for name, field in (
         ("narration-final.mp3", "narration_sha256"),
         ("editorial-contract.json", "editorial_contract_sha256"),
@@ -232,6 +340,10 @@ def _final_result_shape_ok(project: Path, marker, video: Path) -> bool:
         and valid_sha256(marker.get("video_sha256"), lowercase=True)
         and marker["video_sha256"] == video_sha
         and marker.get("bytes") == video_bytes
+        and (
+            marker.get(RENDER_INPUT_REVISION_FIELD) is None
+            or valid_sha256(marker.get(RENDER_INPUT_REVISION_FIELD), lowercase=True)
+        )
         and _mix_evidence_passes(
             marker,
             lowercase_digest=True,
@@ -303,12 +415,16 @@ def final_video_candidates(project: Path) -> list[Path]:
 
 def human_review_time(project: Path, project_file) -> float:
     """Ordering comes from the verdict bytes, never a touch of its file."""
-    path = project_file(project / "quality-review/visual-sampling/visual-qa-review.json", project)
+    path = project_file(
+        project / "quality-review/visual-sampling/visual-qa-review.json", project
+    )
     if not path:
         return float("-inf")
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
-        timestamp = dt.datetime.fromisoformat(receipt["reviewed_at"].replace("Z", "+00:00"))
+        timestamp = dt.datetime.fromisoformat(
+            receipt["reviewed_at"].replace("Z", "+00:00")
+        )
         if timestamp.tzinfo is None:
             return float("-inf")
         return timestamp.timestamp()
@@ -346,7 +462,9 @@ def find_final_video(project: Path, project_file):
     # A later machine report must never erase a human hold. A hold for these
     # exact bytes remains active until the formal HVP-21 review is newer.
     canonical_video = project_file(project / "output/final.mp4", project)
-    human_review = project_file(project / "quality-review/visual-sampling/visual-qa-review.json", project)
+    human_review = project_file(
+        project / "quality-review/visual-sampling/visual-qa-review.json", project
+    )
     if canonical_video and human_review:
         try:
             current_digest = sha256(canonical_video)
@@ -360,11 +478,16 @@ def find_final_video(project: Path, project_file):
                     value = json.loads(safe.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if (isinstance(value, dict) and value.get("publish_readiness") == "hold"
-                        and value.get("video_sha256") == current_digest):
+                if (
+                    isinstance(value, dict)
+                    and value.get("publish_readiness") == "hold"
+                    and value.get("video_sha256") == current_digest
+                ):
                     active_holds.append((path, value))
             if active_holds:
-                hold_path, hold = max(active_holds, key=lambda item: evidence_mtime(item[0]))
+                hold_path, hold = max(
+                    active_holds, key=lambda item: evidence_mtime(item[0])
+                )
                 return canonical_video, hold_path, hold
         except OSError:
             pass
@@ -374,7 +497,9 @@ def find_final_video(project: Path, project_file):
     # legacy revision numbering; never hide a later human hold/review.
     fixed = project / "quality-review/final-v1/review.json"
     safe_fixed = project_file(fixed, project)
-    if safe_fixed and not any(evidence_mtime(other) > evidence_mtime(fixed) for other in reviews):
+    if safe_fixed and not any(
+        evidence_mtime(other) > evidence_mtime(fixed) for other in reviews
+    ):
         try:
             fixed_data = json.loads(safe_fixed.read_text(encoding="utf-8"))
             inputs = fixed_data.get("inputs") if isinstance(fixed_data, dict) else None
@@ -391,9 +516,12 @@ def find_final_video(project: Path, project_file):
                 and inputs[key].get("sha256") == sha256(source)
                 for key, name in expected_inputs.items()
             )
-            if (current and fixed_data.get("schema") == "haru.quality_review.v1"
-                    and fixed_data.get("video") == "output/final.mp4"
-                    and fixed_data.get("video_sha256") == inputs["final_video"]["sha256"]):
+            if (
+                current
+                and fixed_data.get("schema") == "haru.quality_review.v1"
+                and fixed_data.get("video") == "output/final.mp4"
+                and fixed_data.get("video_sha256") == inputs["final_video"]["sha256"]
+            ):
                 return project / "output/final.mp4", fixed, fixed_data
         except (OSError, ValueError, TypeError):
             pass

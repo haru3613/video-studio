@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Debug, Parser)]
-#[command(name = "hvp-state", about = "Repo-owned Haru pipeline state")]
+#[command(name = "hvp-state", about = "Video Studio pipeline state")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

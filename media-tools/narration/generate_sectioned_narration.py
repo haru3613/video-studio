@@ -250,7 +250,9 @@ def run_generator(*, section: dict, section_dir: Path, generator: Path,
                   previous_text: str | None = None, next_text: str | None = None,
                   seed: int, force_budget: bool, retake: bool,
                   voice: str | None = None,
-                  pronunciation_overrides: Path | None = None) -> tuple[dict, bool, str]:
+                  pronunciation_overrides: Path | None = None,
+                  spend_journal: Path | None = None,
+                  max_credits: int | None = None) -> tuple[dict, bool, str]:
     section_id = section["id"]
     text_path = section_dir / f"{section_id}.txt"
     out_base = section_dir / section_id
@@ -265,6 +267,10 @@ def run_generator(*, section: dict, section_dir: Path, generator: Path,
         cmd.extend(["--voice", voice])
     if pronunciation_overrides:
         cmd.extend(["--pronunciation-overrides", str(pronunciation_overrides)])
+    if spend_journal:
+        cmd.extend(["--spend-journal", str(spend_journal)])
+    if max_credits is not None:
+        cmd.extend(["--max-credits", str(max_credits)])
     if normalize:
         cmd.append("--normalize")
     for request_id in previous_ids:
@@ -522,7 +528,17 @@ def main() -> None:
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--seed-base", type=int, default=0)
     parser.add_argument("--retake-section", action="append", default=[])
-    parser.add_argument("--force-budget", action="store_true")
+    parser.add_argument(
+        "--force-budget",
+        action="store_true",
+        help="legacy parent approval marker; a configured credit cap is still required",
+    )
+    parser.add_argument(
+        "--max-credits",
+        type=int,
+        help="shared journal cap; the child also enforces any environment cap",
+    )
+    parser.add_argument("--spend-journal")
     # Voice is per-video, not per-repo: the module constant is only the default.
     # The voice pronunciation rules in the child generator (narration/pronunciation/
     # voice/) are voice-specific, so a non-default voice must be re-verified with
@@ -538,6 +554,11 @@ def main() -> None:
     out_base = Path(args.out_base).resolve()
     section_dir = Path(args.sections_dir).resolve() if args.sections_dir else Path(str(out_base) + "-sections")
     section_dir.mkdir(parents=True, exist_ok=True)
+    spend_journal = (
+        Path(args.spend_journal).expanduser().resolve()
+        if args.spend_journal
+        else section_dir / ".video-studio-tts-spend.sqlite3"
+    )
     # The wrapper respells too, for its own credit accounting. Without this it
     # would price the run against the default voice's table — the exact leak this
     # file's --voice flag exists to prevent.
@@ -575,6 +596,8 @@ def main() -> None:
             retake=section["id"] in args.retake_section,
             voice=voice,
             pronunciation_overrides=overrides_path,
+            spend_journal=spend_journal,
+            max_credits=args.max_credits,
         )
         # Re-time before moving on. The provider's own alignment drifts inside
         # long requests, and merge_sections offsets each section by its measured
