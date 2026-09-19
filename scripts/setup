@@ -11,6 +11,7 @@ else
   echo 'Install Rust with rustup, then rerun scripts/setup.' >&2
   exit 3
 fi
+export PATH="$(dirname "$CARGO_BIN"):$PATH"
 uv sync --locked --python 3.11
 "$CARGO_BIN" build --locked --manifest-path pipeline/Cargo.toml --bins
 "$ROOT/scripts/doctor"
