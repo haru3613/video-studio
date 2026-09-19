@@ -1,7 +1,7 @@
 # Dependency and redistribution audit
 
-**Audit date:** 2026-09-20 (Asia/Taipei)  
-**Worktree base:** `8ea6c3f9158a5d3c9e74f7b56814428a4320843c`, with the current uncommitted OSS candidate changes inspected  
+**Audit date:** 2026-09-20 (Asia/Taipei)
+**Worktree base:** `8ea6c3f9158a5d3c9e74f7b56814428a4320843c`, with the current uncommitted OSS candidate changes inspected
 **Release form assessed:** source only; no dependency, media, model, browser, FFmpeg, or native executable binaries bundled
 
 ## Outcome
@@ -61,7 +61,7 @@ License metadata sources were:
 
 ### Publication blocker
 
-1. **Video Studio license and copyright owner are pending.**  
+1. **Video Studio license and copyright owner are pending.**
    `THIRD_PARTY_NOTICES.md` already says this, `package.json` remains
    `UNLICENSED`, and no root `LICENSE` exists. The owner must choose the
    license and holder before making the repository public. This audit does not
@@ -69,12 +69,12 @@ License metadata sources were:
 
 ### Source-only warnings
 
-1. **Remotion packages are source-available.**  
+1. **Remotion packages are source-available.**
    The runtime closure contains Remotion License packages including
    `remotion`, `@remotion/cli`, renderer, player, bundler, web-renderer,
    studio-protocol, and media-parser. These are not covered by an OSI license.
 
-2. **Eight Remotion package records have no package-level license assertion.**  
+2. **Eight Remotion package records have no package-level license assertion.**
    `@remotion/media@4.0.506` and seven platform compositor packages omit both
    the lockfile license field and a packaged license file. The compositor
    packages are optional binary packages. They are not bundled in this
@@ -82,7 +82,7 @@ License metadata sources were:
    offline cache, container, installer, or vendored `node_modules` release
    until upstream licensing is confirmed.
 
-3. **Weak-copyleft and attribution licenses occur in installed closures.**  
+3. **Weak-copyleft and attribution licenses occur in installed closures.**
    The Node runtime includes MPL-2.0 Mediabunny and encoder packages and
    CC-BY-4.0 `caniuse-lite`; Python includes MPL-2.0 `certifi`. The Rust
    runtime's `r-efi` offers permissive MIT/Apache alternatives in addition to
@@ -90,13 +90,13 @@ License metadata sources were:
    attribution, and file-level/source obligations assessed for the actual
    shipped subset.
 
-4. **Optional G2P transitive dependencies are not locked.**  
+4. **Optional G2P transitive dependencies are not locked.**
    `media-tools/requirements-g2p.txt` pins five direct packages but is not a
    complete hashed lock. The five direct pins were inventoried and audited;
    their transitive closure and model weights were not. Do not describe the
    optional G2P install as reproducible or redistribution-cleared.
 
-5. **Operator tools are outside the source grant.**  
+5. **Operator tools are outside the source grant.**
    FFmpeg/FFprobe, Chrome/Chromium, eSpeak NG, provider voices, and G2P model
    weights are supplied separately. FFmpeg explains that the applicable LGPL
    or GPL obligations depend on build configuration; see

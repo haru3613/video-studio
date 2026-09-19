@@ -21,4 +21,3 @@ else
   PYTHON=/usr/bin/python3
 fi
 exec "$PYTHON" -I -S "$ROOT/tools/workspace_backup.py" "$@"
-
