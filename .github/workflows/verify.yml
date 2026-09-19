@@ -30,6 +30,11 @@ jobs:
       - name: Install macOS media prerequisites
         if: runner.os == 'macOS'
         run: brew install ffmpeg espeak-ng
+      - name: Select the macOS Swift toolchain
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+          /usr/bin/swift --version
       - name: Verify source and workflow regressions
         run: scripts/verify
       - name: Verify template

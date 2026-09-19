@@ -38,6 +38,8 @@ Platform support is only confirmed by the recorded checks, not this target list.
 
 Install Git, [uv](https://docs.astral.sh/uv/), Rust/rustup (the repo pins its
 toolchain), Node.js 22+, FFmpeg/FFprobe, and a local Chrome/Chromium browser.
+On macOS, source verification also requires Swift 6.2 or newer (for example,
+Xcode 26.2) for the native helper tests.
 The optional `--speech` demo also needs [eSpeak NG](https://github.com/espeak-ng/espeak-ng).
 No paid model account is needed for the example.
 
