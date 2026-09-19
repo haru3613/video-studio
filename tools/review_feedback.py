@@ -614,10 +614,6 @@ def resolve_feedback(
 
     store = _store(workspace, project)
 
-    def load_current(_include_durations: bool) -> dict:
-        package_id, assets = _current_package(workspace, project)
-        return {"package_id": package_id, "assets": assets}
-
     try:
         comment, code, package_id = review_domain.resolve_comment(
             store,
@@ -625,8 +621,6 @@ def resolve_feedback(
             status=status_value,
             expected_package_id=expected_package_id,
             expected_asset_sha256=expected_asset_sha256,
-            load_current=load_current,
-            snapshot_fingerprint=lambda asset: _snapshot_fingerprint(workspace, asset),
         )
     except review_domain.ReviewDomainError as error:
         if error.code in {"review_conflict", "review_stale"}:

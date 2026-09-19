@@ -45,6 +45,7 @@ def _generated_cache(relative: str) -> bool:
 
 def _revision_excluded(relative: str) -> bool:
     parts = relative.split("/") if relative else []
+    output_name = parts[-1] if parts and parts[0] == "output" else ""
     return bool(
         _generated_cache(relative)
         or (parts and parts[0] in {".hvp", "quality-review", "publish"})
@@ -57,10 +58,12 @@ def _revision_excluded(relative: str) -> bool:
         or relative == "output/superseded"
         or relative.startswith("output/superseded/")
         or relative in GENERATED_RENDER_OUTPUTS
+        or ("final" in output_name and ".mp4" in output_name)
         or relative
         in {
             "artifact_manifest.json",
             "pipeline_status.json",
+            "publish-metadata.json",
             "youtube-publish-pack.md",
         }
         or ".superseded-" in relative

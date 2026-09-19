@@ -5,6 +5,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ if str(DASHBOARD) not in sys.path:
     sys.path.insert(0, str(DASHBOARD))
 
 import review_api  # noqa: E402
+import version_archive  # noqa: E402
 
 
 COMMAND = ROOT / "scripts" / "review-feedback"
@@ -129,6 +131,59 @@ def write_add_request(project: Path, request_id: str, payload: dict) -> None:
         encoding="utf-8",
     )
     request.chmod(0o400)
+
+
+def ui_video_comment_fixture(
+    tmp_path: Path,
+) -> tuple[Path, dict, dict, TestClient, str]:
+    workspace = tmp_path / "workspace"
+    project = workspace / "projects" / "episode"
+    (project / "authoring").mkdir(parents=True)
+    (project / "output").mkdir()
+    (project / "output" / "final.mp4").write_bytes(b"video-v1")
+    (project / "authoring" / "review-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.review_package.v1",
+                "title": "Episode",
+                "assets": [
+                    {
+                        "id": "video-current",
+                        "kind": "video",
+                        "label": "Video",
+                        "role": "current",
+                        "path": "output/final.mp4",
+                    }
+                ],
+                "changes": [],
+                "chapters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    csrf = review_api.register_review_routes(
+        app,
+        {"studio": workspace / "projects"},
+        storage_root=workspace / ".video-studio" / "review",
+    )
+    client = TestClient(app, base_url="http://localhost")
+    with mock.patch.object(review_api, "_duration", return_value=10.0):
+        review = client.get("/api/review/studio/episode").json()
+        response = client.post(
+            "/api/review/studio/episode/comments",
+            json={
+                "client_id": str(uuid.uuid4()),
+                "package_id": review["package_id"],
+                "asset_id": "video-current",
+                "asset_sha256": review["assets"][0]["sha256"],
+                "timestamp_seconds": 1.5,
+                "body": "Historical render note.",
+            },
+            headers={"Origin": "http://localhost", "X-Haru-Review-CSRF": csrf},
+        )
+    assert response.status_code == 201, response.text
+    return project, review, response.json()["comment"], client, csrf
 
 
 def test_reads_actual_ui_store_without_fastapi_or_private_state(tmp_path: Path) -> None:
@@ -291,7 +346,9 @@ def test_resolve_and_reopen_are_bound_idempotent_review_only_changes(tmp_path: P
     assert not (project / "publish").exists()
 
 
-def test_changed_or_symlinked_media_is_stale_and_cannot_be_reopened(tmp_path: Path) -> None:
+def test_historical_comment_can_be_reopened_only_with_its_persisted_bindings(
+    tmp_path: Path,
+) -> None:
     _, project, review, created = ui_comment_fixture(tmp_path)
     resolve_args = (
         "resolve",
@@ -323,14 +380,24 @@ def test_changed_or_symlinked_media_is_stale_and_cannot_be_reopened(tmp_path: Pa
         "--status",
         "open",
         "--expected-package-id",
-        current["package_id"],
+        created["package_id"],
         "--expected-asset-sha256",
         created["asset"]["sha256"],
     )
-    code, stale = invoke(*reopen_args)
+    current_digest = current["assets"][0]["sha256"]
+    code, conflict = invoke(
+        *reopen_args[:-1],
+        current_digest,
+    )
     assert code == 3
-    assert stale["code"] == "review_stale"
-    assert invoke("read", project)[1]["comments"][0]["status"] == "resolved"
+    assert conflict["code"] == "review_conflict"
+
+    code, reopened = invoke(*reopen_args)
+    assert code == 0
+    assert reopened["comment"]["status"] == "open"
+    feedback = invoke("read", project)[1]
+    assert feedback["comments"][0]["status"] == "open"
+    assert feedback["comments"][0]["stale"] is True
 
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"cover-v1")
@@ -339,7 +406,79 @@ def test_changed_or_symlinked_media_is_stale_and_cannot_be_reopened(tmp_path: Pa
     code, symlinked = invoke("read", project)
     assert code == 0
     assert symlinked["comments"][0]["stale"] is True
+    assert symlinked["comments"][0]["status"] == "open"
     assert str(outside) not in json.dumps(symlinked)
+
+
+def test_archived_render_comment_resolves_and_remains_stale_in_cli_feedback(
+    tmp_path: Path,
+) -> None:
+    project, review, created, _client, _csrf = ui_video_comment_fixture(tmp_path)
+    video = project / "output" / "final.mp4"
+    archived = version_archive.preserve_video(video)
+    replacement = project / "output" / "replacement.mp4"
+    replacement.write_bytes(b"video-v2")
+    replacement.replace(video)
+    assert archived.read_bytes() == b"video-v1"
+
+    code, before = invoke("read", project)
+    assert code == 0
+    assert before["comments"][0]["stale"] is True
+    assert before["comments"][0]["asset_available"] is True
+
+    common = [
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "resolved",
+        "--expected-package-id",
+        created["package_id"],
+        "--expected-asset-sha256",
+    ]
+    current_digest = before["assets"][0]["sha256"]
+    code, conflict = invoke(*common, current_digest)
+    assert code == 3
+    assert conflict["code"] == "review_conflict"
+
+    code, resolved = invoke(*common, created["asset"]["sha256"])
+    assert code == 0
+    assert resolved["comment"]["status"] == "resolved"
+    assert resolved["comment"]["stale"] is True
+    assert resolved["effects"] == {
+        "technical_qa_pass": False,
+        "human_approval": False,
+        "publishing_approval": False,
+    }
+
+    code, feedback = invoke("read", project)
+    assert code == 0
+    assert feedback["comments"][0]["status"] == "resolved"
+    assert feedback["comments"][0]["stale"] is True
+    assert feedback["comments"][0]["asset_available"] is True
+
+
+def test_ui_patch_uses_historical_comment_bindings_after_rerender(tmp_path: Path) -> None:
+    project, _review, created, client, csrf = ui_video_comment_fixture(tmp_path)
+    video = project / "output" / "final.mp4"
+    version_archive.preserve_video(video)
+    replacement = project / "output" / "replacement.mp4"
+    replacement.write_bytes(b"video-v2")
+    replacement.replace(video)
+
+    response = client.patch(
+        f"/api/review/studio/episode/comments/{created['id']}",
+        json={"status": "resolved"},
+        headers={"Origin": "http://localhost", "X-Haru-Review-CSRF": csrf},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["comment"]["status"] == "resolved"
+    code, feedback = invoke("read", project)
+    assert code == 0
+    assert feedback["comments"][0]["status"] == "resolved"
+    assert feedback["comments"][0]["stale"] is True
 
 
 def test_read_does_not_create_review_state(tmp_path: Path) -> None:

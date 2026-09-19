@@ -165,10 +165,8 @@ def resolve_comment(
     status: str,
     expected_package_id: str,
     expected_asset_sha256: str,
-    load_current: Callable[[bool], dict],
-    snapshot_fingerprint: Callable[[dict], tuple[str | None, int]],
 ) -> tuple[dict, str, str]:
-    """Resolve/reopen a current note without creating approval evidence."""
+    """Resolve/reopen one exact persisted note version without approval effects."""
 
     if not canonical_uuid(comment_id) or status not in {"open", "resolved"}:
         raise ReviewDomainError("invalid_input")
@@ -181,30 +179,11 @@ def resolve_comment(
         comment = next((item for item in comments if item.get("id") == comment_id), None)
         if comment is None:
             raise ReviewDomainError("review_conflict")
-        current = load_current(False)
-        if current.get("package_id") != expected_package_id:
+        if comment.get("package_id") != expected_package_id:
             raise ReviewDomainError("review_conflict")
         asset = comment.get("asset", {})
         if asset.get("sha256") != expected_asset_sha256:
             raise ReviewDomainError("review_conflict")
-        current_asset = next(
-            (
-                item
-                for item in current.get("assets", [])
-                if item.get("id") == asset.get("id")
-                and item.get("source") == asset.get("source")
-                and item.get("project") == asset.get("project")
-                and item.get("sha256") == expected_asset_sha256
-            ),
-            None,
-        )
-        digest, size = snapshot_fingerprint(asset)
-        if (
-            current_asset is None
-            or digest != expected_asset_sha256
-            or size != asset.get("bytes")
-        ):
-            raise ReviewDomainError("review_stale")
         code = "review_comment_unchanged"
         if comment.get("status") != status:
             comment["status"] = status

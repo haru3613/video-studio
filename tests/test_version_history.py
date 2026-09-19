@@ -28,6 +28,7 @@ def test_old_comment_plays_exact_archived_bytes_after_new_render(tmp_path):
         "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z",
     }
     ReviewStore(project, storage).update(lambda comments: comments.append(comment))
+    previous_revision = portable_jobs.project_revision(project)
     portable_jobs._preserve_previous(video, "b" * 32)
     # Promotion replaces the inode; it never edits an archived hard link in place.
     replacement = output / "replacement.mp4"
@@ -41,7 +42,7 @@ def test_old_comment_plays_exact_archived_bytes_after_new_render(tmp_path):
         response = client.get(comment["asset"]["url"])
         assert response.status_code == 200
         assert response.content == old
-    assert portable_jobs._excluded(f"output/versions/{checksum}/final.mp4")
+    assert portable_jobs.project_revision(project) == previous_revision
 
 
 def test_archive_refuses_redirected_version_directory(tmp_path):

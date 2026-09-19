@@ -136,9 +136,11 @@ video-studio workspace restore \
 
 Backup refuses active render jobs and takes the workspace-wide barrier so CLI,
 MCP, intake, and review writes cannot cross the snapshot. Restore verifies the
-manifest and file hashes, requires a new empty destination, invalidates leases,
-jobs, publish approval, template trust, and path-bound signatures, and rekeys
-review storage for the new canonical path. Provider credentials, OAuth material,
+manifest and file hashes and requires a new empty destination. Terminal job
+history remains readable; unfinished jobs become interrupted with their prior
+process authority revoked. Restore invalidates leases, publish approval,
+template trust, and path-bound signatures, and rekeys review storage for the
+new canonical path. Provider credentials, OAuth material,
 browser/UI sessions, signing keys, and external attestation ledgers are excluded
 and must be recovered separately by the operator.
 

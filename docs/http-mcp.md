@@ -32,8 +32,9 @@ The HTTP tool scopes are:
 `review_feedback` is also available under `studio:read` and returns the current
 package ID plus typed assets. Adding a note requires a canonical client UUID,
 current package and asset digests, a bounded body, and a valid media timestamp.
-Resolving or reopening requires the comment UUID and the same current version
-bindings. Review mutations use `studio:review`; they do not grant execute scope,
+Resolving or reopening requires the comment UUID and the original package and
+asset digests saved with that comment. Historical notes remain resolvable after
+a rerender, including when their old media is no longer available. Review mutations use `studio:review`; they do not grant execute scope,
 run renderers, or record technical QA, human acceptance, or publishing
 approval.
 Because review mutations intentionally do not require an execute lease, the

@@ -147,7 +147,7 @@ CLI source／inbox 先複製進 workspace。Worker candidate 固定寫入 `<proj
 
 Export 每次建立不可覆寫的 `bundle_id` 目錄，內含 manifest／QA 摘要／媒體 hash；相同 idempotency key 回傳同一 bundle，已有不同內容的 destination 回 conflict。HTTP 的 destination 僅為已配置 export root 下的相對名稱；使用者用 SSH/SFTP 取回，不提供匿名下載連結。inbox 匯入採複製，不刪原檔；staged blobs 有配額與有效期，僅清除已到期且未被 active job 引用者。
 
-備份命令先暫停新製作提交、排空或取消 active jobs，再啟用 workspace-wide write barrier 並取得 review store lock。UI／CLI／stdio／HTTP 的所有 mutation（含留言）都遵守 barrier；在鎖內使用 SQLite backup API 及 immutable artifacts／review snapshot，全部完成後才解除。不得直接複製執行中的 WAL 檔。還原驗證 workspace UUID、schema 和 hashes，清除 ephemeral leases，把殘留 active jobs 標 interrupted，重新導出 currentity；credential file 與授權服務由操作者另外備份。
+備份命令先取得 workspace-wide write barrier，暫停新提交；若仍有 active jobs 則明確拒絕並要求等待完成或由操作者取消後重試，不自動中斷製作。無 active jobs 才取得 review store lock 並建立備份。UI／CLI／stdio／HTTP 的所有 mutation（含留言）都遵守 barrier；在鎖內使用 SQLite backup API 及 immutable artifacts／review snapshot，全部完成後才解除。不得直接複製執行中的 WAL 檔。還原驗證 workspace UUID、schema 和 hashes，清除 ephemeral leases，把殘留 active jobs 標 interrupted，重新導出 currentity；credential file 與授權服務由操作者另外備份。
 
 **背景任務、取消與恢復**
 

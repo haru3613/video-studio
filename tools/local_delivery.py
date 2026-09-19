@@ -264,6 +264,10 @@ def _entry(project: Path, role: str, relative: str, required: bool) -> dict | No
                 "delivery_artifact_missing", f"missing {relative}", outcome="blocked"
             )
         return None
+    if not required:
+        with path.open("rb") as handle:
+            if canonical_layout.TODO_MARKER.encode() in handle.read(4096):
+                return None
     return {
         "role": role,
         "path": relative,
@@ -279,7 +283,10 @@ def _current_input_bindings(project: Path, receipt: dict) -> list[str]:
         ("editorial-contract.json", "editorial_contract_sha256"),
     ):
         path = _project_file(project, relative)
-        if path is not None and receipt.get(field) != _sha256(path):
+        recorded = receipt.get(field)
+        # Embedded-audio and non-editorial lanes may leave canonical scaffolds
+        # unused. The full render-input revision already binds every source byte.
+        if recorded is not None and (path is None or recorded != _sha256(path)):
             problems.append(f"{field} does not bind current {relative}")
     return problems
 
@@ -576,6 +583,8 @@ def _export_delivery_unlocked(
             exported = []
             expected = {item["path"]: item for item in status["artifacts"]}
             for role, source_relative, destination_relative, required in COPY_SPECS:
+                if not required and source_relative not in expected:
+                    continue
                 source = _project_file(project, source_relative)
                 if source is None:
                     if required:

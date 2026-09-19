@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 import visual_qa_sample
-from test_agent_status import seal_self_eval
+import render_contract
+from test_agent_status import bind_render_revision, seal_self_eval
 
 
 def write_png(path, width=1920, height=1080):
@@ -163,6 +164,12 @@ class VisualQaSampleTest(unittest.TestCase):
             encoding="utf-8",
         )
         (self.project / "narration-final.srt").write_text(SRT, encoding="utf-8")
+        marker = Path(str(video) + ".render-result")
+        marker_value = json.loads(marker.read_text(encoding="utf-8"))
+        marker_value["render_input_revision"] = render_contract.render_input_revision(
+            self.project
+        )
+        marker.write_text(json.dumps(marker_value), encoding="utf-8")
         # The whole-video sampler is downstream of HVP-33 and must refuse even a
         # perfectly shaped render marker until the external ledger anchors a
         # current self-eval pass for these exact bytes.
@@ -305,6 +312,7 @@ class VisualQaSampleTest(unittest.TestCase):
         marker = self.project / "output/final.mp4.render-result"
         value = json.loads(marker.read_text())
         value["editorial_contract_sha256"] = hashlib.sha256(contract.read_bytes()).hexdigest()
+        value["render_input_revision"] = render_contract.render_input_revision(self.project)
         marker.write_text(json.dumps(value))
         seal_self_eval(self.project, Path(self._tmp.name), attempt=2)
 
@@ -430,6 +438,7 @@ class VisualQaSampleTest(unittest.TestCase):
         # current; the engine seals it as attempt 2.
         srt = self.project / "narration-final.srt"
         srt.write_text(SRT.replace("body", "body changed"), encoding="utf-8")
+        bind_render_revision(self.project)
         current = seal_self_eval(self.project, Path(self._tmp.name), attempt=2)
         self.assertEqual(current["attempt"], 2)
 
@@ -482,6 +491,7 @@ class VisualQaSampleTest(unittest.TestCase):
         marker = self.project / "output/final.mp4.render-result"
         value = json.loads(marker.read_text())
         value["editorial_contract_sha256"] = hashlib.sha256(contract.read_bytes()).hexdigest()
+        value["render_input_revision"] = render_contract.render_input_revision(self.project)
         marker.write_text(json.dumps(value))
         seal_self_eval(self.project, Path(self._tmp.name), attempt=2)
 

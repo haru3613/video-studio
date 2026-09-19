@@ -18,7 +18,12 @@ import approval_attestation  # noqa: E402
 import publish_approval  # noqa: E402
 import publish_attestation_fixture  # noqa: E402
 import visual_qa_sample  # noqa: E402
-from test_agent_status import make_ready_project, seal_self_eval, record_final_quality_fixture  # noqa: E402
+from test_agent_status import (  # noqa: E402
+    bind_render_revision,
+    make_ready_project,
+    record_final_quality_fixture,
+    seal_self_eval,
+)
 
 
 class Args:
@@ -341,6 +346,7 @@ class PublishApprovalV3Test(RuntimePolicyCase):
         # bytes do not change, isolating the transitive binding this test names.
         srt = self.project / "narration-final.srt"
         srt.write_text(srt.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        bind_render_revision(self.project)
         current = seal_self_eval(self.project, self.root, attempt=2)
         self.assertEqual(current["attempt"], 2)
 

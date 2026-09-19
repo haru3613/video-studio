@@ -14,8 +14,15 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tools" / "dashboard"))
 
 from review_store import ReviewStore  # noqa: E402
+import job_interface  # noqa: E402
+import portable_jobs  # noqa: E402
 from workspace import initialize  # noqa: E402
-from workspace_backup import BackupError, create_backup, restore_backup  # noqa: E402
+from workspace_backup import (  # noqa: E402
+    BackupError,
+    _invalidate_jobs,
+    create_backup,
+    restore_backup,
+)
 from workspace_barrier import backup_barrier, mutation_barrier  # noqa: E402
 
 
@@ -34,8 +41,38 @@ def job_database(project, status="succeeded"):
     state.mkdir(exist_ok=True)
     database = state / "jobs.sqlite3"
     connection = sqlite3.connect(database)
-    connection.execute("CREATE TABLE jobs(job_id TEXT PRIMARY KEY,status TEXT)")
-    connection.execute("INSERT INTO jobs VALUES(?,?)", ("a" * 32, status))
+    connection.execute(
+        """CREATE TABLE jobs(
+          job_id TEXT PRIMARY KEY,kind TEXT,project TEXT,tools_root TEXT,worker TEXT,
+          status TEXT,epoch INTEGER,revision TEXT,snapshot_digest TEXT,
+          snapshot_root TEXT,candidate_root TEXT,pid INTEGER,pid_token TEXT,
+          process_group INTEGER,exit_code INTEGER,error_code TEXT,
+          created_at TEXT,updated_at TEXT
+        )"""
+    )
+    connection.execute(
+        """INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "a" * 32,
+            "render",
+            str(project.resolve()),
+            "/installed/tools",
+            "/installed/worker",
+            status,
+            4,
+            "b" * 64,
+            "c" * 64,
+            str(project / "output/.staging/snapshot"),
+            str(project / "output/.staging/candidate"),
+            4242,
+            "old-process-token",
+            4242,
+            0 if status == "succeeded" else None,
+            None,
+            "2026-09-20T00:00:00+00:00",
+            "2026-09-20T00:01:00+00:00",
+        ),
+    )
     connection.commit()
     connection.close()
     return database
@@ -119,13 +156,36 @@ def test_backup_restore_roundtrip_rekeys_review_and_invalidates_authority(tmp_pa
     restored = tmp_path / "restored"
     response = restore_backup(backup, restored)
     assert response["invalidated"]["active_leases"] is True
-    assert response["invalidated"]["jobs_invalidated"] == 1
+    assert response["invalidated"]["jobs_invalidated"] == 0
     assert (restored / "projects/demo/sources.md").read_text() == "# source\n"
     assert (restored / "projects/demo/output/final.mp4").read_bytes() == b"media-bytes"
     assert (restored / "inbox").is_dir()
     assert (restored / "exports").is_dir()
-    assert not (restored / "projects/demo/.hvp/jobs.sqlite3").exists()
-    assert list((restored / "projects/demo/.hvp").glob("jobs.invalidated-*.sqlite3"))
+    restored_jobs = restored / "projects/demo/.hvp/jobs.sqlite3"
+    assert restored_jobs.is_file()
+    status_response, status_code = job_interface.status(
+        restored / "projects/demo", "a" * 32
+    )
+    assert status_code == 0
+    assert status_response["data"]["status"] == "succeeded"
+    assert status_response["data"]["epoch"] == 4
+    connection = sqlite3.connect(restored_jobs)
+    restored_row = connection.execute(
+        """SELECT project,status,epoch,snapshot_digest,snapshot_root,candidate_root,
+                  pid,pid_token,process_group FROM jobs"""
+    ).fetchone()
+    connection.close()
+    assert restored_row == (
+        str((restored / "projects/demo").resolve()),
+        "succeeded",
+        4,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
     assert not (restored / "projects/demo/.hvp/lease.json").exists()
     assert not (restored / "projects/demo/publish/publish-approval.json").exists()
     comments = ReviewStore(
@@ -147,6 +207,50 @@ def test_active_job_refuses_backup_using_real_sqlite_record(tmp_path):
         create_backup(root, backups)
     assert raised.value.code == "active_jobs"
     assert list(backups.iterdir()) == []
+
+
+def test_restore_interrupts_active_job_without_erasing_history_or_resurrecting_worker(
+    tmp_path,
+):
+    root, _project = workspace(tmp_path)
+    project = root / "projects/demo"
+    database = job_database(project, "running")
+    destination = tmp_path / "restored"
+
+    assert _invalidate_jobs(root, destination) == 1
+    root.rename(destination)
+    restored_project = destination / "projects/demo"
+    response, code = job_interface.status(restored_project, "a" * 32)
+    assert code == 0
+    assert response["data"]["status"] == "interrupted"
+    assert response["data"]["epoch"] == 5
+    assert response["data"]["error_code"] == "workspace_restored"
+    assert response["data"]["can_resume"] is True
+
+    connection = sqlite3.connect(destination / database.relative_to(root))
+    row = connection.execute(
+        """SELECT project,status,epoch,revision,snapshot_digest,snapshot_root,
+                  candidate_root,pid,pid_token,process_group,exit_code,error_code
+           FROM jobs WHERE job_id=?""",
+        ("a" * 32,),
+    ).fetchone()
+    connection.close()
+    assert row == (
+        str(restored_project),
+        "interrupted",
+        5,
+        "b" * 64,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "workspace_restored",
+    )
+    assert portable_jobs.promote_candidate(restored_project, "a" * 32, 4) is False
+    assert not list((restored_project / ".hvp").glob("jobs.invalidated-*.sqlite3"))
 
 
 def test_backup_waits_for_concurrent_mutation_and_captures_completed_bytes(tmp_path):

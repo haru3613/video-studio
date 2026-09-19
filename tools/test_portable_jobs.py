@@ -261,6 +261,98 @@ ffmpeg -y -hide_banner -loglevel error \\
             first_marker["render_input_revision"],
         )
 
+    def test_source_change_during_file_promotion_never_commits_success(self):
+        job_id = "f" * 32
+        revision = portable_jobs.project_revision(self.project)
+        snapshot, snapshot_digest = portable_jobs._snapshot(self.project, job_id, 1)
+        self.assertEqual(snapshot_digest, revision)
+        candidate = snapshot / "output/final.mp4"
+        candidate.write_bytes(b"candidate final")
+        marker = {
+            "schema": "haru.render_result.v1",
+            "status": "render_complete",
+            "render_input_revision": revision,
+            "project": self.project.name,
+            "output": "output/final.mp4",
+            "video_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "bytes": candidate.stat().st_size,
+            "duration_seconds": 1,
+            "loudness_lufs": -14,
+            "true_peak_dbfs": -1,
+            "loudness_range_lu": 2,
+            "mix": {
+                "schema": "haru.final_mix.v1",
+                "method": "ffmpeg_loudnorm_two_pass",
+                "normalization_type": "linear",
+                "input_sha256": "a" * 64,
+                "target": {
+                    "integrated_lufs": -14.0,
+                    "true_peak_dbfs": -1.0,
+                    "loudness_range_lu": 2,
+                },
+            },
+        }
+        Path(str(candidate) + ".render-result").write_text(
+            json.dumps(marker), encoding="utf-8"
+        )
+        canonical = self.project / "output/final.mp4"
+        canonical.write_bytes(b"previous final")
+        previous_marker = dict(marker)
+        previous_marker["video_sha256"] = hashlib.sha256(
+            canonical.read_bytes()
+        ).hexdigest()
+        previous_marker["bytes"] = canonical.stat().st_size
+        canonical_marker = Path(str(canonical) + ".render-result")
+        canonical_marker.write_text(json.dumps(previous_marker), encoding="utf-8")
+        connection = portable_jobs._connect(self.project)
+        try:
+            connection.execute(
+                """INSERT INTO jobs
+                   (job_id,kind,project,tools_root,worker,status,epoch,revision,
+                    snapshot_digest,snapshot_root,candidate_root,created_at,updated_at)
+                   VALUES (?,'render',?,?,?,'running',1,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    str(self.project),
+                    str(self.tools),
+                    str(Path(portable_jobs.__file__).parent / "render_project_worker.py"),
+                    revision,
+                    snapshot_digest,
+                    str(snapshot),
+                    str(snapshot / "output"),
+                    "2026-09-20T00:00:00+00:00",
+                    "2026-09-20T00:00:00+00:00",
+                ),
+            )
+        finally:
+            connection.close()
+        original_promote = portable_jobs._promote_files
+
+        def mutate_after_move(*arguments):
+            original_promote(*arguments)
+            (self.remotion / "src/index.ts").write_text(
+                "export const fixture = 'changed during promotion';",
+                encoding="utf-8",
+            )
+
+        with mock.patch.object(
+            portable_jobs, "_promote_files", side_effect=mutate_after_move
+        ):
+            self.assertFalse(portable_jobs.promote_candidate(self.project, job_id, 1))
+
+        state = portable_jobs.get_job(self.project, job_id, refresh=False)
+        self.assertEqual(state["status"], "interrupted")
+        self.assertEqual(state["error_code"], "project_revision_changed")
+        self.assertEqual(canonical.read_bytes(), b"previous final")
+        restored_marker = json.loads(canonical_marker.read_text(encoding="utf-8"))
+        self.assertEqual(restored_marker["video_sha256"], previous_marker["video_sha256"])
+        self.assertFalse(
+            render_project.render_contract.valid_final_result(
+                self.project, restored_marker, canonical
+            ),
+            "restored prior bytes must not be presented as current after source change",
+        )
+
     def test_interrupted_promotion_restores_the_previous_bytes(self):
         job, _response = self.start()
         job = self.wait_for(job["job_id"], {"running"})

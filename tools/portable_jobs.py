@@ -607,11 +607,53 @@ def _preserve_previous(output: Path, job_id: str) -> dict:
     return backups
 
 
+def _restore_promotion(project: Path, manifest: dict) -> None:
+    output_dir = _direct_directory(project / "output")
+    backups = manifest.get("backups")
+    if not isinstance(backups, dict):
+        raise ValueError("promotion backups")
+    for canonical_name in (
+        "final.mp4",
+        "final.mp4.render-result",
+        "final.mp4.render.log",
+    ):
+        canonical = output_dir / canonical_name
+        backup_value = backups.get(canonical_name)
+        if isinstance(backup_value, str):
+            backup = Path(backup_value)
+            backup.resolve(strict=True).relative_to(output_dir)
+            if backup.is_symlink() or not backup.is_file():
+                raise ValueError("promotion backup")
+            os.replace(backup, canonical)
+        else:
+            try:
+                if canonical.is_symlink() or canonical.is_file():
+                    canonical.unlink()
+            except FileNotFoundError:
+                pass
+    _fsync_directory(output_dir)
+
+
+def _promote_files(
+    video: Path,
+    marker_path: Path,
+    output: Path,
+    canonical_marker: Path,
+) -> None:
+    os.replace(video, output)
+    os.replace(marker_path, canonical_marker)
+    candidate_log = Path(str(video) + ".render.log")
+    if candidate_log.is_file() and not candidate_log.is_symlink():
+        os.replace(candidate_log, Path(str(output) + ".render.log"))
+    _fsync_directory(output.parent)
+
+
 def _recover_promotion(project: Path, job: dict) -> str:
     manifest_path = _job_root(project, job["job_id"]) / "promotion.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         expected = manifest["candidate_sha256"]
+        expected_marker = manifest.get("candidate_marker_sha256")
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         return "interrupted"
     output = project / "output/final.mp4"
@@ -622,30 +664,17 @@ def _recover_promotion(project: Path, job: dict) -> str:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         if (
             _sha256(output) == expected
+            and _sha256(marker_path) == expected_marker
             and marker.get("video_sha256") == expected
+            and marker.get(render_contract.RENDER_INPUT_REVISION_FIELD)
+            == job["revision"]
             and render_contract.valid_final_result(project, marker, output)
         ):
             return "succeeded"
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         pass
-    backups = manifest.get("backups")
-    if not isinstance(backups, dict):
-        return "interrupted"
     try:
-        for canonical_name in (
-            "final.mp4",
-            "final.mp4.render-result",
-            "final.mp4.render.log",
-        ):
-            backup_value = backups.get(canonical_name)
-            if not isinstance(backup_value, str):
-                continue
-            backup = Path(backup_value)
-            backup.resolve(strict=True).relative_to((project / "output").resolve())
-            if backup.is_symlink() or not backup.is_file():
-                raise ValueError("promotion backup")
-            os.replace(backup, project / "output" / canonical_name)
-        _fsync_directory(project / "output")
+        _restore_promotion(project, manifest)
     except (OSError, RuntimeError, ValueError):
         return "interrupted"
     return "interrupted"
@@ -659,9 +688,39 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_promotion_valid(
+    project: Path,
+    job: dict,
+    manifest: dict,
+    output: Path,
+    marker_path: Path,
+) -> bool:
+    try:
+        if (
+            output.is_symlink()
+            or marker_path.is_symlink()
+            or not output.is_file()
+            or not marker_path.is_file()
+            or project_revision(project) != job["revision"]
+            or _sha256(output) != manifest["candidate_sha256"]
+            or _sha256(marker_path) != manifest["candidate_marker_sha256"]
+        ):
+            return False
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        return bool(
+            marker.get("video_sha256") == manifest["candidate_sha256"]
+            and marker.get(render_contract.RENDER_INPUT_REVISION_FIELD)
+            == job["revision"]
+            and render_contract.valid_final_result(project, marker, output)
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def promote_candidate(project_value: Path, job_id: str, epoch: int) -> bool:
     project = _direct_directory(project_value)
     connection = _connect(project)
+    promotion_manifest = None
     try:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
@@ -691,27 +750,48 @@ def promote_candidate(project_value: Path, job_id: str, epoch: int) -> bool:
         output = output_dir / "final.mp4"
         canonical_marker = Path(str(output) + ".render-result")
         backups = _preserve_previous(output, job_id)
-        _atomic_json(
-            _job_root(project, job_id) / "promotion.json",
-            {
-                "schema": "video-studio.pending_promotion.v1",
-                "job_id": job_id,
-                "epoch": epoch,
-                "candidate_sha256": marker["video_sha256"],
-                "backups": backups,
-            },
-        )
+        promotion_manifest = {
+            "schema": "video-studio.pending_promotion.v1",
+            "job_id": job_id,
+            "epoch": epoch,
+            "candidate_sha256": marker["video_sha256"],
+            "candidate_marker_sha256": _sha256(marker_path),
+            "backups": backups,
+        }
+        _atomic_json(_job_root(project, job_id) / "promotion.json", promotion_manifest)
         for candidate in (video, marker_path):
             with candidate.open("rb") as handle:
                 os.fsync(handle.fileno())
-        os.replace(video, output)
-        os.replace(marker_path, canonical_marker)
-        candidate_log = Path(str(video) + ".render.log")
-        if candidate_log.is_file() and not candidate_log.is_symlink():
-            os.replace(candidate_log, Path(str(output) + ".render.log"))
-        _fsync_directory(output_dir)
+        _promote_files(video, marker_path, output, canonical_marker)
 
         connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        current = _row(row)
+        if (
+            not current
+            or current["epoch"] != epoch
+            or current["status"] != "promoting"
+            or not _canonical_promotion_valid(
+                project, current, promotion_manifest, output, canonical_marker
+            )
+        ):
+            error_code = (
+                "project_revision_changed"
+                if current and project_revision(project) != current["revision"]
+                else "promotion_binding_changed"
+            )
+            _restore_promotion(project, promotion_manifest)
+            connection.execute(
+                "UPDATE jobs SET status='interrupted',exit_code=NULL,error_code=?,updated_at=? WHERE job_id=? AND epoch=? AND status='promoting'",
+                (error_code, _now(), job_id, epoch),
+            )
+            connection.execute("COMMIT")
+            current = get_job(project, job_id, refresh=False)
+            if current:
+                _projection(project, current)
+            return False
         changed = connection.execute(
             "UPDATE jobs SET status='succeeded',exit_code=0,error_code=NULL,updated_at=? WHERE job_id=? AND epoch=? AND status='promoting'",
             (_now(), job_id, epoch),
@@ -724,6 +804,11 @@ def promote_candidate(project_value: Path, job_id: str, epoch: int) -> bool:
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
+        if promotion_manifest is not None:
+            try:
+                _restore_promotion(project, promotion_manifest)
+            except (OSError, RuntimeError, ValueError):
+                pass
         try:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(

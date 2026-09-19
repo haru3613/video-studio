@@ -88,6 +88,7 @@ class RuntimeMediaCase(unittest.TestCase):
         storyboard = json.loads(storyboard_path.read_text(encoding="utf-8"))
         storyboard["duration_seconds"] = duration
         storyboard_path.write_text(json.dumps(storyboard), encoding="utf-8")
+        refresh_marker(self.project)
         marker_path = self.project / "output/final.mp4.render-result"
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         marker["duration_seconds"] = duration

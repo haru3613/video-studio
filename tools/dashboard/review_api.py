@@ -554,33 +554,13 @@ def register_review_routes(app: FastAPI, roots: dict[str, Path], storage_root: P
         if existing is None:
             raise _error(404, "comment not found")
 
-        def load_current(include_durations: bool):
-            value, _ = _build_review(
-                source,
-                project,
-                normalized_roots,
-                token,
-                storage,
-                include_comments=False,
-                include_durations=include_durations,
-            )
-            return value
-
-        def fingerprint(snapshot):
-            try:
-                return _sha256(_snapshot_path(snapshot, normalized_roots))
-            except (HTTPException, ValueError, TypeError):
-                return None, 0
-
         try:
             comment, _code, _package_id = review_domain.resolve_comment(
                 store,
                 comment_id=comment_id,
                 status=payload["status"],
-                expected_package_id=current["package_id"],
+                expected_package_id=existing["package_id"],
                 expected_asset_sha256=existing["asset"]["sha256"],
-                load_current=load_current,
-                snapshot_fingerprint=fingerprint,
             )
         except review_domain.ReviewDomainError as exc:
             if exc.code == "comment_not_found":

@@ -128,6 +128,21 @@ class LocalDeliveryTest(unittest.TestCase):
             {item["status"] for item in result["content_checks"]}, {"unperformed"}
         )
 
+    def test_unused_scaffolds_do_not_block_or_enter_technical_delivery(self):
+        placeholder = local_delivery.canonical_layout.TODO_MARKER
+        self.narration.write_text(placeholder)
+        (self.project / "editorial-contract.json").write_text(placeholder)
+        (self.project / "claims.json").write_text(placeholder)
+        self.write_receipt(narration_sha256=None)
+        result = local_delivery.technical_status(self.project)
+        self.assertEqual(result["status"], "technical_ready")
+        exported = local_delivery.export_delivery(
+            self.project, destination=self.delivery, idempotency_key="unused-scaffolds"
+        )
+        bundle = Path(exported["bundle_path"])
+        self.assertFalse((bundle / "sources/claims.json").exists())
+        self.assertTrue((bundle / "video/final.mp4").exists())
+
     def test_tampered_video_and_changed_source_invalidate_the_render_binding(self):
         self.video.write_bytes(self.video.read_bytes() + b"tamper")
         tampered = local_delivery.technical_status(self.project)

@@ -545,20 +545,49 @@ def _verify_backup(backup: Path, manifest: dict) -> None:
         raise BackupError("backup_manifest_invalid", "unlisted backup file")
 
 
-def _invalidate_jobs(workspace: Path, backup_id: str) -> int:
+def _invalidate_jobs(workspace: Path, final_workspace: Path) -> int:
     changed = 0
     for database in workspace.glob("projects/*/.hvp/jobs.sqlite3"):
         connection = sqlite3.connect(database)
         try:
-            changed += connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            required = {
+                "job_id",
+                "project",
+                "status",
+                "epoch",
+                "snapshot_digest",
+                "snapshot_root",
+                "candidate_root",
+                "pid",
+                "pid_token",
+                "process_group",
+                "exit_code",
+                "error_code",
+            }
+            if not required.issubset(columns):
+                raise sqlite3.DatabaseError("jobs schema is not restorable")
+            project = final_workspace / "projects" / database.parents[1].name
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """UPDATE jobs SET project=?,snapshot_digest=NULL,snapshot_root=NULL,
+                   candidate_root=NULL,pid=NULL,pid_token=NULL,process_group=NULL""",
+                (str(project),),
+            )
+            cursor = connection.execute(
+                """UPDATE jobs SET status='interrupted',epoch=epoch+1,exit_code=NULL,
+                   error_code='workspace_restored' WHERE status IN (?,?,?,?)""",
+                ACTIVE_JOBS,
+            )
+            changed += cursor.rowcount
+            connection.commit()
         except sqlite3.Error as exc:
+            connection.rollback()
             raise BackupError("restore_jobs_invalid", str(database)) from exc
         finally:
             connection.close()
-        archived = database.with_name(f"jobs.invalidated-{backup_id[:12]}.sqlite3")
-        if archived.exists() or archived.is_symlink():
-            raise BackupError("restore_jobs_invalid", str(archived))
-        os.rename(database, archived)
     return changed
 
 
@@ -645,7 +674,7 @@ def restore_backup(backup_root: Path, destination: Path) -> dict:
             "workspace_id"
         ):
             raise BackupError("backup_manifest_invalid", "workspace identity changed")
-        interrupted = _invalidate_jobs(staging, manifest["backup_id"])
+        interrupted = _invalidate_jobs(staging, destination)
         reviews_rekeyed = _rekey_reviews(
             staging, destination, manifest["review_buckets"]
         )

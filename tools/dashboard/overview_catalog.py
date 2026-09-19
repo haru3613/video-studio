@@ -202,7 +202,10 @@ def build_overview(
         discovered[key] = project
 
     try:
-        catalog = _load_catalog(Path(catalog_path) if catalog_path else DEFAULT_CATALOG, roots)
+        if catalog_path is None and not DEFAULT_CATALOG.exists():
+            catalog = []  # Optional operator grouping is absent in a fresh install.
+        else:
+            catalog = _load_catalog(Path(catalog_path) if catalog_path else DEFAULT_CATALOG, roots)
     except CatalogError as exc:
         warnings.append(f"dashboard catalog ignored: {exc}")
         groups = [_unclassified(project) for project in discovered.values()]
