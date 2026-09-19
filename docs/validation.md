@@ -1,7 +1,8 @@
 # Validation evidence
 
 The implementation and requested code review are complete. This remains a
-private, source-only release candidate pending the owner's license selection.
+source-only release candidate. The owner has selected Apache-2.0, copyright
+2026 haru3613; LICENSE, NOTICE and package metadata record that decision.
 No production account, original Haru runtime, or public channel was modified.
 
 ## Candidate and source checks
@@ -86,6 +87,6 @@ Remotion retains its separate license terms.
 - Optional G2P models and transitive packages are externally supplied. Binary,
   container, offline-cache and vendored-dependency distribution are not cleared
   by this source-only audit.
-- Public release requires the owner's license/copyright decision and verified
-  public-repository security settings. No license or publication is implied by
-  this verification record.
+- The owner approved Apache-2.0 with copyright 2026 haru3613. Public repository
+  visibility, private vulnerability reporting and branch protection are checked
+  separately from source/runtime verification.

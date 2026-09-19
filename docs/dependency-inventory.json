@@ -21,7 +21,7 @@
       }
     },
     "lockfile": "templates/narrated/remotion/package-lock.json",
-    "lockfile_sha256": "9fc742281368f721c1efc55189b88f4e866988a9c49792e7477e8816b2df1318",
+    "lockfile_sha256": "91b442869e120abfa9a1f7b7bbd6116dfaea8b35d036452ca3ae6b394f4937a0",
     "packages": [
       {
         "integrity": "sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==",
@@ -3194,8 +3194,11 @@
     }
   ],
   "project_license": {
-    "license_file_present": false,
-    "status": "pending_owner_decision"
+    "approved_local_date": "2026-09-20",
+    "copyright": "Copyright 2026 haru3613",
+    "license_file_present": true,
+    "spdx": "Apache-2.0",
+    "status": "owner_approved"
   },
   "python": {
     "audit": {

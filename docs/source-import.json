@@ -171,5 +171,5 @@
     "credentials",
     "private Git history"
   ],
-  "status": "source extracted; portable interfaces implemented and reviewed; source-only release and license pending"
+  "status": "source extracted; portable interfaces implemented and reviewed; Apache-2.0, copyright 2026 haru3613; source-only distribution"
 }

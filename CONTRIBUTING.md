@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is currently a private release candidate. Changes should have a
+This repository is an experimental open-source project. Changes should have a
 clear user-visible purpose and preserve the shared CLI/MCP workflow behavior.
 
 Run `scripts/setup`, then `scripts/verify`. Keep provider calls out of automated

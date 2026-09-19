@@ -6,7 +6,7 @@ server on your own machine. Video Studio does not provide a cloud service.
 
 This is a development release candidate. Implementation and code review are
 complete; see [validation](docs/validation.md) for tested workflows and limits.
-The repository remains private pending the owner's license selection.
+Licensed under [Apache-2.0](LICENSE), copyright 2026 haru3613.
 
 ## What it does
 
@@ -180,4 +180,5 @@ See [contributing](CONTRIBUTING.md), [third-party notices](THIRD_PARTY_NOTICES.m
 [source provenance](docs/source-import.json), and [security reporting](SECURITY.md).
 Generated media, credentials,
 provider responses, browser sessions, and private operator data stay outside
-this repository. No license grant is implied until the owner selects a license.
+this repository. Video Studio source is licensed under Apache-2.0; third-party
+dependencies, including Remotion, retain their own license terms.

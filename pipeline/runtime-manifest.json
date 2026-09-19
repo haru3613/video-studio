@@ -37,6 +37,9 @@
   "state_root": "~/.local/state/video-studio/runtime",
   "closure": {
     "files": [
+      "LICENSE",
+      "NOTICE",
+      "THIRD_PARTY_NOTICES.md",
       ".python-version",
       "examples/narrated/cue-driven-demo/README.md",
       "examples/narrated/cue-driven-demo/assets/README.md",

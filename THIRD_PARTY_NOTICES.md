@@ -4,7 +4,8 @@ Video Studio contains original workflow code extracted from the owner's
 private Studio and media-tools repositories. Exact commits and the reviewed
 source allowlists are recorded in [source-import.json](docs/source-import.json)
 and [media-tools/SOURCE_PROVENANCE.json](media-tools/SOURCE_PROVENANCE.json).
-The repository's own license is pending the owner's decision.
+The original Video Studio source is licensed under Apache-2.0, copyright 2026
+haru3613. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Dependencies retain their own licenses. Rust dependencies are locked in
 `pipeline/Cargo.lock`, Python dependencies in `uv.lock`, and the example's

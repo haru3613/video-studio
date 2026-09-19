@@ -6,11 +6,11 @@
 
 ## Outcome
 
-**NOT READY for public licensing.** The dependency closure is workable for a
-source-only repository, but the repository owner has not selected the
-repository license or copyright holder and no root `LICENSE` exists. Without
-that grant, the public can read the code but does not receive permission to
-copy, modify, or redistribute it.
+**License gate resolved.** The owner selected Apache-2.0 with copyright 2026
+haru3613 on 2026-09-20. Root LICENSE/NOTICE and Python, Rust and template package
+metadata now record that grant. The Node lockfile change affects only this
+project's license metadata; all audited dependency versions and integrity
+values remain unchanged. The inventory records the updated lockfile hash.
 
 Remotion is a separate downstream-use condition, not a reason the repository's
 own source cannot be published. Its official FAQ states that Remotion is
@@ -59,13 +59,10 @@ License metadata sources were:
 
 ## Redistribution findings
 
-### Publication blocker
+### Repository license
 
-1. **Video Studio license and copyright owner are pending.**
-   `THIRD_PARTY_NOTICES.md` already says this, `package.json` remains
-   `UNLICENSED`, and no root `LICENSE` exists. The owner must choose the
-   license and holder before making the repository public. This audit does not
-   grant one.
+The initial audit's pending-license blocker is resolved by the owner's
+Apache-2.0 decision. Third-party packages retain their own terms.
 
 ### Source-only warnings
 
@@ -157,7 +154,7 @@ repository.
 
 ## Required decisions before publication
 
-1. Owner selects the Video Studio license and copyright holder.
+1. Completed: owner selected Apache-2.0, copyright 2026 haru3613.
 2. Keep the Remotion notice and downstream-use warning visible in the README and
    notices.
 3. Keep the release source-only. Before any binary/container/offline-cache
