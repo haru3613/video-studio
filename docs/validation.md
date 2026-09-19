@@ -7,8 +7,10 @@ No production account, original Haru runtime, or public channel was modified.
 
 ## Candidate and source checks
 
-The executable candidate is `0f609a0`; subsequent documentation and CI edits
-do not change its runtime closure. Source provenance is recorded in
+The workflow evidence below was collected on executable candidate `0f609a0`
+(and `d163877` for the final HTTP run). The licensing follow-up adds Apache-2.0
+package metadata and LICENSE/NOTICE to the installed runtime closure without
+changing workflow logic. Source provenance is recorded in
 [source-import.json](source-import.json) and the media-tools provenance file.
 
 On macOS arm64, `scripts/verify` passed with:
