@@ -859,6 +859,157 @@ async def raw_post(
         )
 
 
+def _redacted(value: str, token: str) -> str:
+    return value.replace(token, "<redacted-token>")
+
+
+def claude_mcp_healthcheck(
+    cli: Path,
+    *,
+    resource_url: str,
+    token: str,
+    ca_path: Path,
+    root: Path,
+) -> str:
+    try:
+        executable = cli.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("Claude Code executable is unavailable") from error
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError("Claude Code executable is not executable")
+
+    client_root = root / "claude-client"
+    home = client_root / "home"
+    config_dir = client_root / "config"
+    cwd = client_root / "cwd"
+    for directory in (client_root, home, config_dir, cwd):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    server_name = "video-studio-e2e"
+    config_path = client_root / "mcp.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    server_name: {
+                        "type": "http",
+                        "url": resource_url,
+                        "headers": {"Authorization": f"Bearer {token}"},
+                    }
+                }
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    environment = {
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(config_dir),
+        "NODE_EXTRA_CA_CERTS": str(ca_path),
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "TERM": "dumb",
+        "NO_COLOR": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    }
+
+    def invoke(*arguments: str) -> tuple[int, str]:
+        completed = subprocess.run(
+            [str(executable), *arguments],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        combined = _redacted(completed.stdout + "\n" + completed.stderr, token)
+        return completed.returncode, combined
+
+    def connected_line(output: str) -> bool:
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        health_lines = [
+            line.strip()
+            for line in plain.splitlines()
+            if line.strip()
+            and re.search(r"[✓✔]\s*Connected\b", line, re.IGNORECASE)
+        ]
+        return len(health_lines) == 1 and server_name in health_lines[0]
+
+    try:
+        version_code, version_output = invoke("--version")
+        if version_code != 0:
+            raise RuntimeError("Claude Code version probe failed")
+        version = next(
+            (line.strip() for line in version_output.splitlines() if line.strip()),
+            "unknown-version",
+        )
+        common = (
+            "--strict-mcp-config",
+            "--mcp-config",
+            str(config_path),
+            "mcp",
+        )
+        list_code, list_output = invoke(*common, "list")
+        scope = "strict inline config"
+        if list_code != 0 or not connected_line(list_output):
+            add_code, _add_output = invoke(
+                "mcp",
+                "add",
+                "--transport",
+                "http",
+                "--scope",
+                "user",
+                server_name,
+                resource_url,
+            )
+            settings_path = config_dir / ".claude.json"
+            if add_code != 0 or settings_path.is_symlink() or not settings_path.is_file():
+                raise RuntimeError("Claude Code isolated MCP configuration failed")
+            try:
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                servers = settings["mcpServers"]
+                server = servers[server_name]
+            except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+                raise RuntimeError("Claude Code isolated MCP settings were malformed") from error
+            if (
+                set(servers) != {server_name}
+                or server.get("type") != "http"
+                or server.get("url") != resource_url
+            ):
+                raise RuntimeError("Claude Code isolated MCP settings contained unexpected servers")
+            server["headers"] = {"Authorization": f"Bearer {token}"}
+            temporary = settings_path.with_name(".claude.json.tmp")
+            temporary.write_text(
+                json.dumps(settings, separators=(",", ":")), encoding="utf-8"
+            )
+            temporary.chmod(0o600)
+            os.replace(temporary, settings_path)
+            settings_path.chmod(0o600)
+            list_code, list_output = invoke("mcp", "list")
+            if list_code != 0 or not connected_line(list_output):
+                raise RuntimeError("Claude Code isolated user-scope MCP health check failed")
+            common = ("mcp",)
+            scope = "isolated user-scope fallback"
+        get_code, get_output = invoke(*common, "get", server_name)
+        get_plain = re.sub(r"\x1b\[[0-9;]*m", "", get_output)
+        if get_code != 0 or server_name not in get_plain or resource_url not in get_plain:
+            raise RuntimeError("Claude Code strict MCP get did not return the isolated server")
+        return f"{version} ({scope})"
+    finally:
+        for sensitive in (
+            config_path,
+            config_dir / ".claude.json",
+            config_dir / ".claude.json.tmp",
+        ):
+            try:
+                sensitive.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def structured_result(result: Any, operation: str) -> dict[str, Any]:
     if result.isError or not isinstance(result.structuredContent, dict):
         raise RuntimeError(f"{operation} returned an MCP error")
@@ -922,6 +1073,8 @@ async def render_and_export(
                 ),
                 "run_next render-project",
             )
+            if started.get("outcome") != "ok" or started.get("code") != "gate_started":
+                raise RuntimeError("fresh render submission did not return gate_started")
             job_id = nested_string(started, "job_id")
         else:
             job_id = existing_job_id
@@ -1115,6 +1268,8 @@ async def exercise_gateway(
     fake_backend: bool,
     render_project: bool,
     existing_job_id: str | None,
+    claude_cli: Path | None,
+    client_root: Path,
 ) -> None:
     read_execute_token = await authorization_code_token(fixture, config, ca_path)
     review_only_token = fixture.token((REVIEW_SCOPE,))
@@ -1128,6 +1283,16 @@ async def exercise_gateway(
     token_scopes = set(str(decoded.get("scope", "")).split())
     if not {READ_SCOPE, EXECUTE_SCOPE}.issubset(token_scopes):
         raise RuntimeError("Keycloak did not issue the requested Video Studio scopes")
+    if claude_cli is not None:
+        version = await asyncio.to_thread(
+            claude_mcp_healthcheck,
+            claude_cli,
+            resource_url=config.resource_url,
+            token=read_execute_token,
+            ca_path=ca_path,
+            root=client_root,
+        )
+        print(f"PASS: Claude Code {version} strict isolated MCP health check")
 
     async with sdk_session(config.resource_url, read_execute_token, ca_path) as session:
         tools = await session.list_tools()
@@ -1280,6 +1445,7 @@ async def run_tls_integration(
     fake_backend: bool,
     render_project: bool,
     existing_job_id: str | None,
+    claude_cli: Path | None,
 ) -> None:
     jwks_client = httpx.AsyncClient(
         verify=str(ca_path), trust_env=False, timeout=5.0, follow_redirects=False
@@ -1325,6 +1491,8 @@ async def run_tls_integration(
                     fake_backend=fake_backend,
                     render_project=render_project,
                     existing_job_id=existing_job_id,
+                    claude_cli=claude_cli,
+                    client_root=certificate_directory.parent,
                 )
             finally:
                 await asyncio.to_thread(proxy.stop)
@@ -1349,6 +1517,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--existing-job-id",
         help="poll/export a previously accepted canonical render job without submitting another",
+    )
+    parser.add_argument(
+        "--claude-cli",
+        type=Path,
+        help="run no-inference Claude Code strict MCP list/get with isolated config",
     )
     return parser.parse_args(argv)
 
@@ -1427,6 +1600,7 @@ def main(argv: list[str] | None = None) -> int:
                     fake_backend=fake_backend,
                     render_project=args.render_project is not None,
                     existing_job_id=args.existing_job_id,
+                    claude_cli=args.claude_cli,
                 )
             )
             print("PASS: Keycloak authorization-code + PKCE S256 and exact callback checks")

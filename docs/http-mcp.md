@@ -141,13 +141,30 @@ render/job/delivery path:
 ```sh
 uv run python tests/integration_http_keycloak.py \
   --context /tmp/video-studio-e2e-context.json \
-  --render-project demo
+  --render-project demo \
+  --claude-cli /absolute/path/to/claude
 ```
 
 This mode derives the delivery root from the context's isolated QA directory,
 claims a principal-bound project lease, submits `render-project`, polls the
 opaque job for at most five minutes, checks delivery status, exports once, and
 releases the lease. It still makes no provider, publishing, or paid call.
+The MCP client uses a 10-second connect timeout and a 120-second request timeout;
+the separate render-job deadline remains five minutes.
+
+`--claude-cli` performs only Claude Code `mcp list/get` health checks. It uses a
+new mode-700 HOME, `CLAUDE_CONFIG_DIR`, working directory, and the generated
+test CA. If Claude's management command ignores inline strict config, the
+harness adds one user-scope server inside that isolated config, patches its
+mode-600 file with the disposable bearer token, and requires exactly one
+explicit `✓/✔ Connected` result. The token is never placed in argv or printed,
+the temporary config is removed, nonessential traffic is disabled, and no
+model inference occurs.
+
+When a transport timeout occurs after a render was accepted, maintainers must
+inspect durable job state before retrying. `--existing-job-id <hex32>` can poll
+and export that exact job without submitting another render; its receipt must
+be reported as read/export evidence rather than fresh submission evidence.
 
 The check starts `quay.io/keycloak/keycloak:26.7.4` pinned to the tested image
 digest and `nginx:1.27.5-alpine` pinned to its tested digest. Both use uniquely

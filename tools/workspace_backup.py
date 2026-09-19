@@ -210,9 +210,11 @@ def _walk(root: Path):
 
 def _active_jobs(root: Path) -> list[dict]:
     active = []
+    authoritative_projects = set()
     for database in root.glob("projects/*/.hvp/jobs.sqlite3"):
         if database.is_symlink() or not database.is_file():
             raise BackupError("jobs_database_invalid", str(database))
+        project = database.parents[1]
         try:
             connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
             rows = connection.execute(
@@ -225,11 +227,17 @@ def _active_jobs(root: Path) -> list[dict]:
             if "connection" in locals():
                 connection.close()
                 del connection
+        authoritative_projects.add(project)
         active.extend(
-            {"project": database.parents[1].name, "job_id": row[0], "status": row[1]}
+            {"project": project.name, "job_id": row[0], "status": row[1]}
             for row in rows
         )
     for projection in root.glob("projects/*/.hvp/render-job.json"):
+        # The JSON file is a compatibility mirror. Once a valid durable jobs
+        # database exists for this project, only that database owns lifecycle
+        # state; a stale mirror must not resurrect a terminal job for backup.
+        if projection.parents[1] in authoritative_projects:
+            continue
         try:
             value = json.loads(projection.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):

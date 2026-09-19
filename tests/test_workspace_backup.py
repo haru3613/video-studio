@@ -209,6 +209,72 @@ def test_active_job_refuses_backup_using_real_sqlite_record(tmp_path):
     assert list(backups.iterdir()) == []
 
 
+def test_terminal_database_overrides_stale_running_projection(tmp_path):
+    root, project = workspace(tmp_path)
+    job_database(project, "failed")
+    (project / ".hvp/render-job.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.render_job.v2",
+                "job_id": "a" * 32,
+                "project": "demo",
+                "status": "running",
+            }
+        )
+    )
+    backups = tmp_path / "backups"
+    backups.mkdir()
+
+    result = create_backup(root, backups)
+
+    assert Path(result["path"]).is_dir()
+    backed = sqlite3.connect(Path(result["path"]) / "data/projects/demo/.hvp/jobs.sqlite3")
+    assert backed.execute("SELECT status FROM jobs WHERE job_id=?", ("a" * 32,)).fetchone() == (
+        "failed",
+    )
+    backed.close()
+
+
+def test_legacy_running_projection_without_database_still_refuses_backup(tmp_path):
+    root, project = workspace(tmp_path)
+    state = project / ".hvp"
+    state.mkdir()
+    (state / "render-job.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.render_job.v2",
+                "job_id": "a" * 32,
+                "project": "demo",
+                "status": "running",
+            }
+        )
+    )
+    backups = tmp_path / "backups"
+    backups.mkdir()
+
+    with pytest.raises(BackupError) as raised:
+        create_backup(root, backups)
+
+    assert raised.value.code == "active_jobs"
+    assert list(backups.iterdir()) == []
+
+
+def test_invalid_jobs_database_fails_closed_even_with_terminal_projection(tmp_path):
+    root, project = workspace(tmp_path)
+    state = project / ".hvp"
+    state.mkdir()
+    (state / "jobs.sqlite3").write_bytes(b"not a sqlite database")
+    (state / "render-job.json").write_text('{"status":"failed"}')
+    backups = tmp_path / "backups"
+    backups.mkdir()
+
+    with pytest.raises(BackupError) as raised:
+        create_backup(root, backups)
+
+    assert raised.value.code == "jobs_database_invalid"
+    assert list(backups.iterdir()) == []
+
+
 def test_restore_interrupts_active_job_without_erasing_history_or_resurrecting_worker(
     tmp_path,
 ):
