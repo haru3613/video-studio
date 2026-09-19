@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg:#0D1117; --ink:#F8FAFC; --teal:#2DD4BF; --coral:#F87171;
+    --amber:#F5B800; --violet:#A78BFA; --muted:#7D8694;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1280px;height:720px;overflow:hidden}
+  /* Neutral subject-centered cover. The operator supplies the subject image. */
+  .cover{
+    position:relative;width:1280px;height:720px;background:var(--bg);
+    background-image:radial-gradient(900px 600px at 50% 42%, #161D27 0%, #0D1117 64%);
+    font-family:"PingFang TC","Noto Sans TC","Heiti TC","STHeiti",sans-serif;
+    overflow:hidden;
+  }
+  .cover::before{
+    content:"";position:absolute;inset:0;
+    background-image:radial-gradient(rgba(125,134,148,.10) 1px,transparent 1px);
+    background-size:26px 26px;opacity:.5;
+  }
+  .subject{
+    position:absolute;left:50%;bottom:0;height:100%;transform:translateX(-50%);
+    filter:drop-shadow(0 10px 30px rgba(0,0,0,.6));z-index:2;
+  }
+  /* Multi-shadow outline keeps text crisp over bright subject imagery. */
+  .tx{
+    font-weight:800;color:var(--ink);z-index:4;letter-spacing:.01em;
+    text-shadow:0 0 2px #000,0 2px 4px #000,0 4px 14px rgba(0,0,0,.85),0 0 22px rgba(0,0,0,.6);
+  }
+  .top{
+    position:absolute;top:34px;left:0;right:0;z-index:4;
+    display:flex;flex-direction:column;align-items:center;gap:14px;
+  }
+  .kicker{
+    color:var(--teal);border:2px solid rgba(45,212,191,.6);border-radius:999px;
+    padding:7px 20px;font-size:27px;font-weight:700;background:rgba(13,17,23,.55);
+  }
+  .kicker:empty{display:none}
+  .topline{font-size:TOP_SIZE;line-height:1.0}
+  .topline:empty{display:none}
+  .bottom{position:absolute;bottom:40px;left:0;right:0;z-index:4;text-align:center}
+  .botline{font-size:BOTTOM_SIZE;line-height:1.05}
+  .hl{color:var(--ACCENT)}
+  .sub{margin-top:14px;color:var(--muted);font-size:28px;font-weight:700;
+    text-shadow:0 2px 6px #000;}
+  .sub:empty{display:none}
+</style>
+</head>
+<body>
+  <div class="cover">
+    <img class="subject" src="SUBJECT_SRC" alt="">
+    <div class="top">
+      <div class="kicker tx" style="text-shadow:none">KICKER_HTML</div>
+      <div class="topline tx">TOP_HTML</div>
+    </div>
+    <div class="bottom tx">
+      <div class="botline">BOTTOM_HTML</div>
+      <div class="sub">SUBTITLE_HTML</div>
+    </div>
+  </div>
+</body>
+</html>

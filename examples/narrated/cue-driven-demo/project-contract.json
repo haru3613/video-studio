@@ -1,0 +1,8 @@
+{
+  "schema": "haru.project_contract.v1",
+  "lane_contract": "manual.v1",
+  "selection": {
+    "chosen_by": "example-author",
+    "chosen_at": 1789776000
+  }
+}

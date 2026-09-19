@@ -1,0 +1,11 @@
+#!/bin/sh -p
+set -eu
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+export PATH
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+exec /usr/bin/python3 -I -S "$ROOT/tools/visual_qa_sample.py" "$@"

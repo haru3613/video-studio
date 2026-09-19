@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+: "${YOUTUBE_CHANNEL_ID:?YOUTUBE_CHANNEL_ID is required}"
+: "${YOUTUBE_OAUTH_TOKEN_FILE:?YOUTUBE_OAUTH_TOKEN_FILE is required}"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+as_of_date=$(date -u +%F)
+export YOUTUBE_RETRO_AS_OF_DATE="$as_of_date"
+
+exec python3 "$repo_root/tools/job_contract.py" run \
+  "$repo_root/jobs/retro.json" \
+  --run-id "retro-$as_of_date"

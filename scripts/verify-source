@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+command -v uv >/dev/null || { echo 'uv is required; see README.md' >&2; exit 1; }
+command -v node >/dev/null || { echo 'Node.js is required; see README.md' >&2; exit 1; }
+if command -v cargo >/dev/null; then
+  CARGO_BIN="$(command -v cargo)"
+elif [[ -x /opt/homebrew/opt/rustup/bin/cargo ]]; then
+  CARGO_BIN=/opt/homebrew/opt/rustup/bin/cargo
+else
+  echo 'Rust/cargo is required; see rust-toolchain.toml' >&2
+  exit 1
+fi
+export PATH="$(dirname "$CARGO_BIN"):$PATH"
+uv sync --locked --python 3.11
+uv run --locked python -m compileall -q tools media-tools
+for script in scripts/*; do
+  if [[ -f "$script" ]] && head -1 "$script" | grep -qE '^#!.*(sh|bash)'; then
+    bash -n "$script"
+  fi
+done
+for source in tools/dashboard/*.js; do node --check "$source"; done
+"$CARGO_BIN" fmt --manifest-path pipeline/Cargo.toml --check
+"$CARGO_BIN" clippy --locked --manifest-path pipeline/Cargo.toml --all-targets -- -D warnings
+"$CARGO_BIN" test --locked --manifest-path pipeline/Cargo.toml
+uv run --locked pytest -q tools tests media-tools/tests
+if [[ "$(uname -s)" == Darwin ]]; then
+  /usr/bin/swift test --package-path native/publish-approval
+else
+  echo 'Native macOS signing helper is unsupported on this platform; publishing remains unconfigured.'
+fi
+git diff --check
+echo 'source verification passed; this does not authorize publication or provider spending'

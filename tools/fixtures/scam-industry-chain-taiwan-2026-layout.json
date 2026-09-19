@@ -1,0 +1,27 @@
+{
+  "schema": "haru.real_project_layout_fixture.v1",
+  "source_project": "scam-industry-chain-taiwan-2026",
+  "observed_at": "2026-07-30",
+  "basis": "Inventory captured from a real produced project before HVP-19 implementation; it was not generated from gate declarations.",
+  "observed_artifacts": [
+    ".hvp/selection.json",
+    "claims.json",
+    "issue_brief.md",
+    "narration-final.mp3",
+    "narration-final.mp3.pron-ok.json",
+    "narration-final.srt",
+    "output/cover.png",
+    "output/final.mp4",
+    "output/final.mp4.render-result",
+    "quality-review/final-v3/prep.json",
+    "quality-review/final-v3/review.json",
+    "remotion/package-lock.json",
+    "remotion/package.json",
+    "remotion/src/Episode.tsx",
+    "script-proposal.md",
+    "sources.md",
+    "storyboard-final-timed-validation.json",
+    "storyboard-final-timed.json",
+    "youtube-publish-pack.md"
+  ]
+}

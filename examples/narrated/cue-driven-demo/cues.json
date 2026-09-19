@@ -1,0 +1,8 @@
+[
+  {"start": 0.0, "end": 3.5, "text": "A signal starts as a small change."},
+  {"start": 3.5, "end": 6.5, "text": "Context makes it visible."},
+  {"start": 6.5, "end": 11.0, "text": "First, remove noise."},
+  {"start": 11.0, "end": 15.0, "text": "Then compare it with a baseline."},
+  {"start": 15.0, "end": 20.0, "text": "Finally, choose one action."},
+  {"start": 20.0, "end": 24.0, "text": "A useful signal ends in a decision."}
+]

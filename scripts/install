@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo 'Install requires clean committed source; review and commit changes first.' >&2
+  exit 3
+fi
+BIN_DIR="$HOME/.local/share/video-studio/bin"
+mkdir -p "$BIN_DIR"
+CLI_TARGET="$BIN_DIR/video-studio"
+CLI_SOURCE="$ROOT/scripts/video-studio-installed"
+if [[ -e "$CLI_TARGET" || -L "$CLI_TARGET" ]]; then
+  if [[ -L "$CLI_TARGET" ]] || ! cmp -s "$CLI_SOURCE" "$CLI_TARGET"; then
+    echo 'Refusing to overwrite an existing unrelated CLI launcher.' >&2
+    exit 3
+  fi
+fi
+"$ROOT/scripts/setup"
+HVP_RUNTIME_STATE="$HOME/.local/state/video-studio/runtime" \
+HVP_LAUNCHER_PATH="$HOME/.local/share/video-studio/bin/video-studio-mcp" \
+  "$ROOT/pipeline/target/debug/hvp-runtime" install-source --repo "$ROOT"
+if [[ ! -e "$CLI_TARGET" ]]; then
+  install -m 755 "$CLI_SOURCE" "$CLI_TARGET"
+fi
+printf 'Installed CLI: %s\nInstalled MCP: %s\n' "$CLI_TARGET" "$BIN_DIR/video-studio-mcp"
+printf '%s\n' 'Add the displayed bin directory to PATH, or invoke those paths directly.'

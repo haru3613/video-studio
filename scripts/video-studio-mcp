@@ -1,0 +1,55 @@
+#!/bin/sh -p
+# The one stable video-studio MCP entrypoint.
+#
+# Installation places these exact bytes in Video Studio's private launcher
+# directory under ~/.local/share/video-studio/bin, and
+# MCP clients register that path. Nothing points at a repository checkout: a client configured against
+# pipeline/target/debug follows whichever branch that worktree happens to be on,
+# which is the split-brain this launcher exists to end.
+#
+# Order matters. The release bytes are checked before anything from the release
+# is executed, and the release's own verifier -- itself already digest-checked
+# here -- confirms the receipt, contract versions, capability floor and tool
+# surface before hvp-mcp is exec'd.
+#
+# Every diagnostic goes to stderr: stdout is the MCP stdio channel and a single
+# stray byte on it breaks the session.
+set -eu
+PATH=/usr/bin:/bin
+export PATH
+
+STATE="${HOME:?HOME is not set}/.local/state/video-studio/runtime"
+unset HVP_RUNTIME_STATE HARU_VIDEO_STUDIO_ATTESTATION_ROOT
+ACTIVE="$STATE/active"
+
+fail() {
+  printf 'video-studio-mcp: %s\n' "$1" >&2
+  exit 5
+}
+
+[ -d "$ACTIVE" ] || fail "no installed runtime is active; run hvp-runtime install-source"
+cd -P "$ACTIVE" || fail "the active selection cannot be entered"
+SELECTION="$PWD"
+RELEASE="$SELECTION/release"
+POINTER="$SELECTION/active-digest"
+[ -d "$RELEASE" ] || fail "the active selection has no release"
+[ -f "$POINTER" ] || fail "the active selection has no digest pointer"
+cd -P "$RELEASE" || fail "the active runtime cannot be entered"
+RESOLVED="$PWD"
+
+[ -f DIGESTS ] || fail "the active runtime has no digest list"
+[ -f receipt.json ] || fail "the active runtime has no promotion receipt"
+[ -x bin/hvp-runtime ] || fail "the active runtime has no verifier"
+[ -x bin/hvp-mcp ] || fail "the active runtime has no server"
+
+expected="$(/usr/bin/cut -d' ' -f1 "$POINTER")"
+actual="$(/usr/bin/shasum -a 256 DIGESTS | /usr/bin/cut -d' ' -f1)"
+[ -n "$expected" ] || fail "the active digest pointer is empty"
+[ "$expected" = "$actual" ] || fail "the active runtime is not the selected runtime"
+
+/usr/bin/shasum -a 256 -c DIGESTS >/dev/null 2>&1 || fail "promoted runtime bytes changed since promotion"
+
+"$RESOLVED/bin/hvp-runtime" verify --release "$RESOLVED" >/dev/null || \
+  fail "the promoted runtime failed its own verification"
+
+exec "$RESOLVED/bin/hvp-mcp"

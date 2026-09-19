@@ -1,0 +1,330 @@
+import json
+import hashlib
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import portable_jobs
+import render_project
+import template_trust
+
+
+class PortableRenderJobsTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.project = self.root / "project"
+        self.tools = self.root / "tools"
+        self.remotion = self.project / "remotion"
+        (self.remotion / "node_modules/.bin").mkdir(parents=True)
+        (self.project / "output").mkdir()
+        (self.tools / "video").mkdir(parents=True)
+        (self.remotion / "package.json").write_text("{}", encoding="utf-8")
+        (self.remotion / "package-lock.json").write_text("{}", encoding="utf-8")
+        (self.remotion / "remotion.config.ts").write_text(
+            "export default {};", encoding="utf-8"
+        )
+        (self.remotion / "src").mkdir()
+        (self.remotion / "src/index.ts").write_text(
+            "export const fixture = true;", encoding="utf-8"
+        )
+        remotion = self.remotion / "node_modules/.bin/remotion"
+        remotion.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        remotion.chmod(remotion.stat().st_mode | stat.S_IXUSR)
+        self.renderer = self.tools / "video/render_and_verify.sh"
+        self.renderer.write_text("#!/bin/sh\nsleep 30\nexit 9\n", encoding="utf-8")
+        self.renderer.chmod(self.renderer.stat().st_mode | stat.S_IXUSR)
+        (self.project / "render_plan.json").write_text(
+            json.dumps(
+                {
+                    "schema": "haru.render_plan.v1",
+                    "engine": "remotion",
+                    "remotion_dir": "remotion",
+                    "composition": "PortableJobTest",
+                    "output": "output/final.mp4",
+                    "expected_duration": 1,
+                    "concurrency": 1,
+                    "skip_pronunciation_gate": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        template_trust.trust(self.project)
+        self.jobs = []
+
+    def tearDown(self):
+        for job_id in self.jobs:
+            try:
+                job = portable_jobs.get_job(self.project, job_id)
+                if job and job["status"] in portable_jobs.ACTIVE:
+                    portable_jobs.cancel(self.project, job_id)
+                elif job and portable_jobs._same_process(job):
+                    os.killpg(job["process_group"], signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        self.directory.cleanup()
+
+    def start(self):
+        response, code = render_project.run(self.project, self.tools)
+        self.assertEqual(code, 0, response)
+        self.assertIn(response["code"], {"render_started", "render_running"})
+        job_id = response["data"]["job_id"]
+        if job_id not in self.jobs:
+            self.jobs.append(job_id)
+        return portable_jobs.get_job(self.project, job_id), response
+
+    def wait_for(self, job_id, statuses, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = portable_jobs.get_job(self.project, job_id)
+            if job and job["status"] in statuses:
+                return job
+            time.sleep(0.03)
+        self.fail(f"job {job_id} did not reach {statuses}: {job}")
+
+    def install_real_renderer(self):
+        self.renderer.write_text(
+            """#!/bin/sh
+case "$1" in
+  --verify-only|--loudness-gate-only) exit 0 ;;
+esac
+ffmpeg -y -hide_banner -loglevel error \\
+  -f lavfi -i color=c=black:s=160x90:r=30:d=1 \\
+  -f lavfi -i sine=frequency=440:sample_rate=48000:duration=1 \\
+  -filter:a volume=0.02 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$3"
+""",
+            encoding="utf-8",
+        )
+        self.renderer.chmod(self.renderer.stat().st_mode | stat.S_IXUSR)
+
+    def bind_narration(self, payload):
+        narration = self.project / "narration-final.mp3"
+        narration.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        (self.project / "narration-final.mp3.pron-ok.json").write_text(
+            json.dumps({"sha256": digest, "warnings": []}), encoding="utf-8"
+        )
+        (self.project / "narration.txt").write_text("approved words", encoding="utf-8")
+        static = self.remotion / "public/narration-final.mp3"
+        static.parent.mkdir(exist_ok=True)
+        static.write_bytes(payload)
+        plan = json.loads((self.project / "render_plan.json").read_text())
+        plan.pop("skip_pronunciation_gate", None)
+        plan["narration"] = "narration-final.mp3"
+        plan["narration_text"] = "narration.txt"
+        (self.project / "render_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+    def test_client_exit_does_not_cancel_and_duplicate_start_is_idempotent(self):
+        caller = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json,render_project,sys; "
+                    "value,code=render_project.run(sys.argv[1],sys.argv[2]); "
+                    "print(json.dumps(value)); raise SystemExit(code)"
+                ),
+                str(self.project),
+                str(self.tools),
+            ],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(caller.returncode, 0, caller)
+        started = json.loads(caller.stdout)
+        job_id = started["data"]["job_id"]
+        self.jobs.append(job_id)
+
+        job = self.wait_for(job_id, {"running"})
+        self.assertTrue(
+            Path(job["snapshot_root"])
+            .resolve()
+            .is_relative_to((self.project / "output/.staging").resolve())
+        )
+        again, code = render_project.run(self.project, self.tools)
+        self.assertEqual(code, 0)
+        self.assertEqual(again["code"], "render_running")
+        self.assertEqual(again["data"]["job_id"], job_id)
+
+    def test_cancel_records_intent_and_only_terminates_owned_process_group(self):
+        job, _response = self.start()
+        job = self.wait_for(job["job_id"], {"running"})
+        unrelated = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+        try:
+            cancelled = portable_jobs.cancel(self.project, job["job_id"])
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertIsNone(unrelated.poll())
+            self.assertFalse((self.project / "output/final.mp4").exists())
+        finally:
+            os.killpg(unrelated.pid, signal.SIGTERM)
+            unrelated.wait(timeout=5)
+
+    def test_crashed_worker_becomes_interrupted_and_resume_fences_old_epoch(self):
+        job, _response = self.start()
+        job = self.wait_for(job["job_id"], {"running"})
+        old_epoch = job["epoch"]
+        os.killpg(job["process_group"], signal.SIGKILL)
+        interrupted = self.wait_for(job["job_id"], {"interrupted"})
+        self.assertEqual(interrupted["epoch"], old_epoch)
+
+        resumed = portable_jobs.resume(self.project, job["job_id"])
+        resumed = self.wait_for(job["job_id"], {"running"})
+        self.assertEqual(resumed["epoch"], old_epoch + 1)
+        self.assertNotEqual(resumed["pid_token"], job["pid_token"])
+        self.assertFalse(
+            portable_jobs.promote_candidate(self.project, job["job_id"], old_epoch)
+        )
+        self.assertEqual(
+            portable_jobs.get_job(self.project, job["job_id"])["status"], "running"
+        )
+
+    def test_project_change_blocks_stale_candidate_before_canonical_output(self):
+        job, _response = self.start()
+        job = self.wait_for(job["job_id"], {"running"})
+        (self.project / "new-input.txt").write_text("revision two", encoding="utf-8")
+
+        self.assertFalse(
+            portable_jobs.promote_candidate(self.project, job["job_id"], job["epoch"])
+        )
+        fenced = portable_jobs.get_job(self.project, job["job_id"])
+        self.assertEqual(fenced["status"], "interrupted")
+        self.assertEqual(fenced["error_code"], "project_revision_changed")
+        self.assertFalse((self.project / "output/final.mp4").exists())
+
+    def test_interrupted_promotion_restores_the_previous_bytes(self):
+        job, _response = self.start()
+        job = self.wait_for(job["job_id"], {"running"})
+        os.killpg(job["process_group"], signal.SIGKILL)
+        portable_jobs._CHILDREN[job["pid"]].wait(timeout=5)
+
+        output = self.project / "output/final.mp4"
+        marker = self.project / "output/final.mp4.render-result"
+        output.write_bytes(b"previous diagnostic bytes")
+        marker.write_text('{"previous":true}\n', encoding="utf-8")
+        backup_video = self.project / "output/final.mp4.superseded-recovery"
+        backup_marker = self.project / "output/final.mp4.render-result.superseded-recovery"
+        os.link(output, backup_video)
+        backup_marker.write_bytes(marker.read_bytes())
+        partial = self.project / "output/partial-candidate.mp4"
+        partial.write_bytes(b"partial candidate bytes")
+        os.replace(partial, output)
+        portable_jobs._atomic_json(
+            self.project / "output/.staging" / job["job_id"] / "promotion.json",
+            {
+                "schema": "video-studio.pending_promotion.v1",
+                "job_id": job["job_id"],
+                "epoch": job["epoch"],
+                "candidate_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "backups": {
+                    "final.mp4": str(backup_video),
+                    "final.mp4.render-result": str(backup_marker),
+                },
+            },
+        )
+        connection = portable_jobs._connect(self.project)
+        try:
+            connection.execute(
+                "UPDATE jobs SET status='promoting' WHERE job_id=?",
+                (job["job_id"],),
+            )
+        finally:
+            connection.close()
+
+        recovered = portable_jobs.get_job(self.project, job["job_id"])
+        self.assertEqual(recovered["status"], "interrupted")
+        self.assertEqual(output.read_bytes(), b"previous diagnostic bytes")
+        self.assertEqual(marker.read_text(), '{"previous":true}\n')
+
+    def test_custom_browser_is_forwarded_without_provider_secrets(self):
+        browser = self.root / "custom-chromium"
+        browser.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        browser.chmod(browser.stat().st_mode | stat.S_IXUSR)
+        self.renderer.write_text(
+            """#!/bin/sh
+if [ "${OPENAI_API_KEY+x}" = x ] || [ "${PROVIDER_SECRET_SENTINEL+x}" = x ]; then
+  exit 91
+fi
+printf '%s' "$VIDEO_STUDIO_CHROMIUM" > "$3.browser"
+exit 9
+""",
+            encoding="utf-8",
+        )
+        self.renderer.chmod(self.renderer.stat().st_mode | stat.S_IXUSR)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "VIDEO_STUDIO_CHROMIUM": str(browser),
+                "OPENAI_API_KEY": "provider-secret-must-not-cross",
+                "PROVIDER_SECRET_SENTINEL": "also-must-not-cross",
+            },
+            clear=False,
+        ):
+            job, _response = self.start()
+        failed = self.wait_for(job["job_id"], {"failed"})
+        observed = (
+            Path(failed["snapshot_root"])
+            / "output/final.pre-loudnorm.mp4.browser"
+        )
+        self.assertEqual(observed.read_text(), str(browser.resolve()))
+
+    def test_real_render_promotes_once_and_failed_retake_keeps_previous_final(self):
+        self.install_real_renderer()
+        self.bind_narration(b"approved take one")
+        first, _response = self.start()
+        first = self.wait_for(first["job_id"], {"succeeded"}, timeout=20)
+        final = self.project / "output/final.mp4"
+        marker = self.project / "output/final.mp4.render-result"
+        self.assertTrue(final.is_file())
+        self.assertTrue(marker.is_file())
+        original_digest = hashlib.sha256(final.read_bytes()).hexdigest()
+        self.assertEqual(json.loads(marker.read_text())["video_sha256"], original_digest)
+        process = portable_jobs._CHILDREN.get(first["pid"])
+        if process is not None:
+            process.wait(timeout=5)
+        connection = portable_jobs._connect(self.project)
+        try:
+            connection.execute(
+                "UPDATE jobs SET status='promoting' WHERE job_id=?",
+                (first["job_id"],),
+            )
+        finally:
+            connection.close()
+        recovered = portable_jobs.get_job(self.project, first["job_id"])
+        self.assertEqual(recovered["status"], "succeeded")
+
+        self.bind_narration(b"approved take two")
+        self.renderer.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+        self.renderer.chmod(self.renderer.stat().st_mode | stat.S_IXUSR)
+        response, code = render_project.run(self.project, self.tools)
+        self.assertEqual(code, 0, response)
+        retry_id = response["data"]["job_id"]
+        self.jobs.append(retry_id)
+        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
+        self.wait_for(retry_id, {"failed"}, timeout=10)
+        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
+        self.assertEqual(json.loads(marker.read_text())["video_sha256"], original_digest)
+
+        self.install_real_renderer()
+        resumed = portable_jobs.resume(self.project, retry_id)
+        self.assertEqual(resumed["epoch"], 2)
+        self.wait_for(retry_id, {"succeeded"}, timeout=20)
+        promoted = json.loads(marker.read_text())
+        take_two_digest = hashlib.sha256(b"approved take two").hexdigest()
+        self.assertEqual(promoted["narration_sha256"], take_two_digest)
+        old_stamp = hashlib.sha256(b"approved take one").hexdigest()[:12]
+        self.assertTrue(
+            (self.project / f"output/final.mp4.superseded-{old_stamp}").is_file()
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

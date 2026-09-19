@@ -1,0 +1,32 @@
+{
+  "name": "@video-studio/narrated-remotion-template",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local cue-driven Remotion template for Video Studio",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node tests/validate-content.mjs src/content.json",
+    "studio": "remotion studio src/index.ts --no-open",
+    "render:landscape": "remotion render src/index.ts NarratedLandscape output/landscape.mp4",
+    "render:portrait": "remotion render src/index.ts NarratedPortrait output/portrait.mp4",
+    "render:cover": "remotion still src/index.ts NarratedCover output/cover.png"
+  },
+  "dependencies": {
+    "@remotion/captions": "4.0.506",
+    "@remotion/cli": "4.0.506",
+    "@remotion/media": "4.0.506",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.506"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "@types/react": "18.3.28",
+    "typescript": "5.9.3"
+  }
+}

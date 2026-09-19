@@ -1,0 +1,11 @@
+{
+  "schema": "video_studio.project.v1",
+  "id": "cue-driven-demo",
+  "title": "From signal to decision",
+  "profile": "narrated.v1",
+  "template": "narrated-remotion.v1",
+  "language": "en",
+  "aspect_ratios": ["16:9", "9:16"],
+  "fps": 30,
+  "duration_seconds": 24
+}

@@ -1,0 +1,18 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+case "${1:-}" in
+  status|logs|cancel|resume) ;;
+  *)
+    printf '%s\n' '{"schema_version":1,"outcome":"error","code":"invalid_input","project":null,"data":null}'
+    exit 2
+    ;;
+esac
+
+exec /usr/bin/python3 -I -S "$ROOT/tools/job_interface.py" "$@"

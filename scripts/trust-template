@@ -1,0 +1,25 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+[ "$#" -eq 1 ] || {
+  printf '%s\n' 'usage: trust-template <project>' >&2
+  exit 2
+}
+
+exec /usr/bin/python3 -I -S -c '
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import template_trust
+try:
+    value = template_trust.trust(pathlib.Path(sys.argv[2]))
+except (OSError, TypeError, ValueError):
+    print(json.dumps({"schema_version":1,"outcome":"error","code":"template_untrusted","project":sys.argv[2],"data":None}, separators=(",", ":")))
+    raise SystemExit(3)
+print(json.dumps({"schema_version":1,"outcome":"ok","code":"template_trusted","project":sys.argv[2],"data":value}, separators=(",", ":")))
+' "$ROOT/tools" "$1"

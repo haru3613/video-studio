@@ -1,0 +1,10 @@
+{
+  "schema": "haru.render_plan.v1",
+  "engine": "remotion",
+  "remotion_dir": "remotion",
+  "composition": "NarratedLandscape",
+  "output": "output/final.mp4",
+  "expected_duration": 24,
+  "concurrency": 1,
+  "skip_pronunciation_gate": true
+}

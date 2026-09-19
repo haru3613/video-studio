@@ -1,0 +1,6 @@
+# Optional G2P planner runtime. Models are not included or downloaded by this repo.
+g2pw==0.1.1
+onnxruntime==1.28.0
+requests==2.34.2
+torch==2.13.0
+transformers==5.14.1

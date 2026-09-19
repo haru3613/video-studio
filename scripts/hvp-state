@@ -1,0 +1,22 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+BINARY="$ROOT/pipeline/target/debug/hvp-state"
+
+fail_unavailable() {
+  if [ "${1:-}" = "app" ]; then
+    printf '%s\n' '{"schema_version":1,"outcome":"error","code":"runner_unavailable","project":null,"data":null}'
+  else
+    printf '%s\n' "hvp-state binary missing or stale; run scripts/verify" >&2
+  fi
+  exit 5
+}
+
+[ -x "$BINARY" ] || fail_unavailable "$@"
+
+exec "$BINARY" "$@"

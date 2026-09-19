@@ -1,0 +1,9 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+exec /usr/bin/python3 -I -S "$ROOT/tools/editorial_preview.py" "$@"

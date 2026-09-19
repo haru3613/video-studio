@@ -1,0 +1,15 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+command -v uv >/dev/null 2>&1 || {
+  printf '%s\n' 'video-studio-http: uv is required' >&2
+  exit 5
+}
+
+exec uv run --project "$ROOT" python "$ROOT/tools/http_mcp.py" "$@"

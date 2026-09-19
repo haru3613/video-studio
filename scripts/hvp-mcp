@@ -1,0 +1,16 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+BINARY="$ROOT/pipeline/target/debug/hvp-mcp"
+
+if [ ! -x "$BINARY" ]; then
+  printf '%s\n' "hvp-mcp binary missing or stale; run scripts/verify" >&2
+  exit 5
+fi
+
+exec "$BINARY"

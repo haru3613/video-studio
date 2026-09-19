@@ -1,0 +1,8 @@
+[
+  {"text": "A signal starts as a small change.", "startMs": 0, "endMs": 3500, "timestampMs": null, "confidence": null},
+  {"text": "Context makes it visible.", "startMs": 3500, "endMs": 6500, "timestampMs": null, "confidence": null},
+  {"text": "First, remove noise.", "startMs": 6500, "endMs": 11000, "timestampMs": null, "confidence": null},
+  {"text": "Then compare it with a baseline.", "startMs": 11000, "endMs": 15000, "timestampMs": null, "confidence": null},
+  {"text": "Finally, choose one action.", "startMs": 15000, "endMs": 20000, "timestampMs": null, "confidence": null},
+  {"text": "A useful signal ends in a decision.", "startMs": 20000, "endMs": 24000, "timestampMs": null, "confidence": null}
+]
