@@ -1,17 +1,20 @@
 # Video Studio
 
-A local video-production workflow for people and AI agents.
+A self-hosted video-production workflow for people and AI agents.
 
 This repository is being prepared for an open-source release. It currently
 contains project documentation and a preparation plan; the executable workflow
 has not been imported yet.
 
-The planned first version connects planning, narration, storyboarding,
-rendering, quality checks, and human review through an MCP interface. A local
-dashboard and a small, redistributable example will demonstrate the workflow.
+The planned first version provides a complete CLI and a self-hosted MCP server
+with stdio and authenticated HTTP transports. Both use the same workflow core
+for planning, narration, storyboarding, rendering, quality checks, and export.
+A local review dashboard and a small, redistributable example will demonstrate
+the workflow. Video Studio does not provide a managed cloud service.
 
-See [the preparation plan](docs/open-source-plan.md) for scope and acceptance
-criteria.
+See [the preparation plan](docs/open-source-plan.md) for the project scope and
+[the implementation plan](docs/implementation-plan.md) for interfaces,
+architecture, delivery stages, and acceptance criteria.
 
 Run the documentation-stage repository checks with:
 
