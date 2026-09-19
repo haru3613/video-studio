@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+for path in README.md AGENTS.md .gitignore docs/open-source-plan.md; do
+  if [[ ! -s "$path" ]]; then
+    echo "missing or empty required file: $path" >&2
+    exit 1
+  fi
+done
+
+bash -n scripts/verify
+git diff --check
+git diff --cached --check
+echo "documentation-stage checks passed; no executable workflow is installed yet"

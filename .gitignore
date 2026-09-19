@@ -1,0 +1,33 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.env
+credentials/
+secrets/
+*.pem
+*.key
+
+# Dependencies and build output
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+target/
+dist/
+
+# Private runtime state and generated media
+.hvp/
+.state/
+output/
+outputs/
+renders/
+tmp/
+*.log
+browser-profile/
+chrome-profile/
+
+# Local worktrees and editor files
+.worktrees/
+.DS_Store
+*.swp
