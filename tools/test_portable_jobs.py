@@ -16,6 +16,24 @@ import render_project
 import template_trust
 
 
+class LinuxProcessTokenTest(unittest.TestCase):
+    def test_proc_stat_parser_preserves_start_time_and_reports_state(self):
+        prefix = "4321 (render worker (take 2))"
+        fields_four_through_twenty_one = [str(value) for value in range(4, 22)]
+        running = " ".join(
+            [prefix, "S", *fields_four_through_twenty_one, "55534", "0"]
+        )
+        zombie = running.replace(f"{prefix} S ", f"{prefix} Z ", 1)
+
+        self.assertEqual(
+            portable_jobs._parse_linux_proc_stat(running), ("S", "55534")
+        )
+        self.assertEqual(
+            portable_jobs._parse_linux_proc_stat(zombie), ("Z", "55534")
+        )
+        self.assertIsNone(portable_jobs._parse_linux_proc_stat("4321 malformed"))
+
+
 class PortableRenderJobsTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

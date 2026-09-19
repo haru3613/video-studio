@@ -57,7 +57,12 @@ and are absent from HTTP schemas.
 Remote intake uses `artifact_stage` with exactly one of `inbox_path` or
 `inline_text`. `inbox_path` is relative to the operator-mounted workspace
 `inbox/`; inline UTF-8 text is limited to 1 MiB and restricted to text/JSON
-roles. The returned opaque stage ID can be passed to `artifact_import` for the
+roles. Stored stages bind the workspace, project, authenticated owner, content
+digest, and a 24-hour expiry. Another owner cannot import or promote the stage.
+Each project has a 100 MiB staging quota; the next staging operation removes
+verified expired entries. Expired entries are unusable immediately, even before
+cleanup. Legacy stages without this binding must be staged again.
+The returned opaque stage ID can be passed to `artifact_import` for the
 fixed non-canonical imports namespace, or to `produce_staged_artifact` for one
 of seven reviewed text/JSON targets. Media, subtitles, code, final narration,
 render output, QA, approval, and publishing receipts cannot be promoted through

@@ -817,8 +817,11 @@ fn render_in_progress(data: &Option<Value>, project: &Path) -> bool {
             .get("data")
             .and_then(Value::as_object)
             .is_some_and(|data| {
-                data.keys().all(|key| JOB_FIELDS.contains(&key.as_str()))
-                    && data.len() == JOB_FIELDS.len()
+                let preserved = data.get("previous_final_preserved");
+                data.keys().all(|key| {
+                    JOB_FIELDS.contains(&key.as_str()) || key == "previous_final_preserved"
+                }) && preserved.is_none_or(|value| value == &Value::Bool(true))
+                    && data.len() == JOB_FIELDS.len() + usize::from(preserved.is_some())
                     && data.get("schema").and_then(Value::as_str) == Some("haru.render_job.v2")
                     && data
                         .get("job_id")
@@ -2481,13 +2484,8 @@ fn safe_inbox_path(value: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
-fn inline_intake_request(project: &Path, role: &str, text: &str) -> io::Result<(String, PathBuf)> {
-    let mut digest = Sha256::new();
-    digest.update(b"video_studio.inline_intake.v1\0");
-    digest.update(role.as_bytes());
-    digest.update([0]);
-    digest.update(text.as_bytes());
-    let request_id = format!("{:x}", digest.finalize())[..32].to_owned();
+fn inline_intake_request(project: &Path, text: &str) -> io::Result<(String, PathBuf)> {
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
     let state = project.join(".hvp");
     let metadata = fs::symlink_metadata(&state)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -2632,7 +2630,11 @@ fn intake_failure(result: CommandResult, project: &Path) -> AppResult {
         .and_then(Value::as_str)
         .unwrap_or("command_failed")
         .to_owned();
-    if result.exit_code == Some(3) && matches!(code.as_str(), "stage_conflict" | "import_conflict")
+    if result.exit_code == Some(3)
+        && matches!(
+            code.as_str(),
+            "stage_conflict" | "import_conflict" | "stage_quota_exceeded"
+        )
     {
         AppResult::blocked_with_data(&code, project, result.data)
     } else if result.exit_code == Some(2)
@@ -2647,9 +2649,12 @@ fn intake_failure(result: CommandResult, project: &Path) -> AppResult {
                 | "artifact_too_large"
                 | "artifact_type_invalid"
                 | "inline_role_invalid"
+                | "invalid_owner"
                 | "invalid_stage_id"
                 | "stage_not_found"
                 | "stage_invalid"
+                | "stage_owner_mismatch"
+                | "stage_expired"
                 | "invalid_request_id"
                 | "inline_request_not_found"
         )
@@ -2708,12 +2713,13 @@ pub fn artifact_stage(
                         project.clone().into_os_string(),
                         request.role.clone().into(),
                         path.clone().into(),
+                        request.lease.owner.clone().into(),
                     ],
                     None,
                 ),
                 (None, Some(text)) => {
-                    let (request_id, path) = inline_intake_request(&project, &request.role, text)
-                        .map_err(StoreError::Io)?;
+                    let (request_id, path) =
+                        inline_intake_request(&project, text).map_err(StoreError::Io)?;
                     (
                         vec![
                             OsString::from("stage-inline-file"),
@@ -2721,6 +2727,7 @@ pub fn artifact_stage(
                             project.clone().into_os_string(),
                             request.role.clone().into(),
                             request_id.into(),
+                            request.lease.owner.clone().into(),
                         ],
                         Some(path),
                     )
@@ -2794,6 +2801,7 @@ pub fn artifact_import(
         workspace.into_os_string(),
         project.clone().into_os_string(),
         request.stage_id.clone().into(),
+        request.lease.owner.clone().into(),
     ];
     let token = &request.lease.capability;
     let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
@@ -2869,8 +2877,22 @@ pub fn produce_staged_artifact(
         workspace.into_os_string(),
         project.clone().into_os_string(),
         request.stage_id.clone().into(),
+        request.lease.owner.clone().into(),
     ];
-    let resolved = match executor.execute(&program, &arguments) {
+    let token = &request.lease.capability;
+    let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
+        &request.lease.owner,
+        &request.lease.lease_id,
+        request.lease.generation,
+        token,
+        SystemTime::now(),
+        || {
+            executor
+                .execute(&program, &arguments)
+                .map_err(StoreError::Io)
+        },
+    );
+    let resolved = match execution {
         Ok(result)
             if result.exit_code == Some(0)
                 && artifact_stage_valid(
@@ -2887,7 +2909,13 @@ pub fn produce_staged_artifact(
             result
         }
         Ok(result) => return intake_failure(result, &project),
-        Err(_) => return AppResult::error("runner_unavailable", Some(&project)),
+        Err(StoreError::LeaseMismatch | StoreError::LeaseExpired) => {
+            return AppResult::blocked("lease_invalid", &project);
+        }
+        Err(StoreError::Io(_)) => {
+            return AppResult::error("runner_unavailable", Some(&project));
+        }
+        Err(_) => return AppResult::error("internal_error", Some(&project)),
     };
     let Some(stage) = resolved.data.and_then(|value| value.get("data").cloned()) else {
         return AppResult::error("command_failed", Some(&project));
@@ -4801,6 +4829,30 @@ mod render_postcheck_tests {
             "project": project.to_string_lossy(),
             "data": data
         }))
+    }
+
+    #[test]
+    fn rerender_preservation_receipt_is_accepted_without_opening_job_schema() {
+        let directory = tempdir().unwrap();
+        let project = directory.path().join("demo");
+        let job = "a".repeat(32);
+        let mut result = json!({
+            "outcome": "ok", "code": "render_started", "project": project,
+            "data": {
+                "schema": "haru.render_job.v2", "job_id": job, "project": "demo",
+                "status": "running", "launcher": "portable-python", "epoch": 1,
+                "revision": "b".repeat(64), "pid": 1234,
+                "log": project.join("output/.staging").join(&job).join("worker.log"),
+                "output": "output/final.mp4", "started_at": "2026-09-20T00:00:00Z",
+                "previous_final_preserved": true
+            }
+        });
+        assert!(super::render_in_progress(&Some(result.clone()), &project));
+        result["data"]["previous_final_preserved"] = json!("true");
+        assert!(!super::render_in_progress(&Some(result.clone()), &project));
+        result["data"]["previous_final_preserved"] = json!(true);
+        result["data"]["worker_path"] = json!("/tmp/untrusted");
+        assert!(!super::render_in_progress(&Some(result), &project));
     }
 
     #[test]

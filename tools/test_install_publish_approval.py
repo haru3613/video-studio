@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -105,6 +106,10 @@ class FakeRunner:
 
 class InstallerTest(unittest.TestCase):
     def setUp(self):
+        # FakeRunner models macOS commands; host prerequisites are tested separately.
+        commands = mock.patch.object(installer, "COMMANDS", ())
+        commands.start()
+        self.addCleanup(commands.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
         self.repo = self.root / "repo"
@@ -134,6 +139,11 @@ class InstallerTest(unittest.TestCase):
             system_name="Darwin",
         )
         return receipt, runner
+
+    def test_missing_host_command_is_rejected_before_signing(self):
+        with mock.patch.object(installer, "COMMANDS", (str(self.root / "missing-command"),)):
+            with self.assertRaisesRegex(installer.InstallError, "required command is unavailable"):
+                self.run_install()
 
     def test_installs_signed_version_with_restricted_entitlements_and_hash_launcher(self):
         receipt, runner = self.run_install()

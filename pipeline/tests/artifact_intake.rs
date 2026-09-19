@@ -17,7 +17,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, LeaseInput) {
+fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, LeaseInput, String) {
     let directory = tempdir().unwrap();
     let workspace = directory.path().join("workspace");
     let project = workspace.join("projects/demo");
@@ -37,13 +37,14 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, LeaseInput) {
     let lease = ProjectStore::new(&project)
         .claim_at("agent", Duration::from_secs(60), SystemTime::now())
         .unwrap();
+    let capability = lease.token.clone();
     let lease = LeaseInput::from_lease(&lease);
-    (directory, workspace, project, lease)
+    (directory, workspace, project, lease, capability)
 }
 
 #[test]
 fn workspace_reads_expose_ids_without_absolute_project_paths() {
-    let (_directory, workspace, project, _lease) = fixture();
+    let (_directory, workspace, project, _lease, _capability) = fixture();
     fs::write(project.join("project-contract.json"), "{}").unwrap();
     fs::create_dir(workspace.join("projects/not initialized")).unwrap();
     assert!(
@@ -80,7 +81,7 @@ fn workspace_reads_expose_ids_without_absolute_project_paths() {
 
 #[test]
 fn staged_inbox_can_import_and_produce_only_allowlisted_agent_artifacts() {
-    let (_directory, workspace, project, lease) = fixture();
+    let (_directory, workspace, project, lease, _capability) = fixture();
     fs::write(workspace.join("inbox/script.md"), "# Reviewed script\n").unwrap();
     let repo = repo_root();
     let mut executor = ProcessExecutor;
@@ -161,7 +162,7 @@ fn staged_inbox_can_import_and_produce_only_allowlisted_agent_artifacts() {
 
 #[test]
 fn staging_requires_exactly_one_bounded_source_and_valid_stage_ids() {
-    let (_directory, _workspace, project, lease) = fixture();
+    let (_directory, _workspace, project, lease, _capability) = fixture();
     let repo = repo_root();
     let mut executor = ProcessExecutor;
     let invalid = application::artifact_stage(
@@ -191,7 +192,7 @@ fn staging_requires_exactly_one_bounded_source_and_valid_stage_ids() {
 
 #[test]
 fn full_size_inline_text_uses_a_private_request_file_not_process_argv() {
-    let (_directory, _workspace, project, lease) = fixture();
+    let (_directory, _workspace, project, lease, _capability) = fixture();
     let repo = repo_root();
     let mut executor = ProcessExecutor;
     let staged = application::artifact_stage(
@@ -209,4 +210,59 @@ fn full_size_inline_text_uses_a_private_request_file_not_process_argv() {
     let requests = project.join(".hvp/intake-requests");
     assert!(requests.is_dir());
     assert_eq!(fs::read_dir(requests).unwrap().count(), 0);
+}
+
+#[test]
+fn staged_artifact_cannot_cross_verified_lease_owners() {
+    let (_directory, _workspace, project, first_lease, first_capability) = fixture();
+    let repo = repo_root();
+    let mut executor = ProcessExecutor;
+    let staged = application::artifact_stage(
+        &ArtifactStageRequest {
+            project_root: project.clone(),
+            lease: first_lease,
+            role: "script_notes".to_owned(),
+            inbox_path: None,
+            inline_text: Some("# Owner-bound script\n".to_owned()),
+        },
+        &repo,
+        &mut executor,
+    );
+    assert_eq!(staged.code, "artifact_staged");
+    let stage_id = staged.data.as_ref().unwrap()["stage_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let store = ProjectStore::new(&project);
+    store.release("agent", &first_capability).unwrap();
+    let second_lease = store
+        .claim_at("reviewer", Duration::from_secs(60), SystemTime::now())
+        .unwrap();
+    let second_lease = LeaseInput::from_lease(&second_lease);
+
+    let imported = application::artifact_import(
+        &ArtifactImportRequest {
+            project_root: project.clone(),
+            lease: second_lease.clone(),
+            stage_id: stage_id.clone(),
+        },
+        &repo,
+        &mut executor,
+    );
+    assert_eq!(imported.code, "stage_owner_mismatch");
+
+    let produced = application::produce_staged_artifact(
+        &ProduceStagedArtifactRequest {
+            project_root: project.clone(),
+            lease: second_lease,
+            stage_id,
+            artifact: "script-proposal.md".to_owned(),
+            produced_by: "reviewer".to_owned(),
+        },
+        &repo,
+        &mut executor,
+    );
+    assert_eq!(produced.code, "stage_owner_mismatch");
+    assert!(!project.join("script-proposal.md").exists());
 }

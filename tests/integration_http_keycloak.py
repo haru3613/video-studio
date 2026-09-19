@@ -835,6 +835,7 @@ async def sdk_session(
     async with httpx.AsyncClient(
         verify=str(ca_path),
         headers=headers,
+        timeout=httpx.Timeout(120.0, connect=10.0),
     ) as client:
         async with streamable_http_client(
             resource_url, http_client=client
@@ -881,7 +882,12 @@ def nested_string(value: Any, key: str) -> str | None:
     return None
 
 
-async def render_and_export(session: ClientSession, project_id: str) -> None:
+async def render_and_export(
+    session: ClientSession,
+    project_id: str,
+    *,
+    existing_job_id: str | None = None,
+) -> None:
     suffix = uuid.uuid4().hex[:12]
     claim = structured_result(
         await session.call_tool(
@@ -901,21 +907,24 @@ async def render_and_export(session: ClientSession, project_id: str) -> None:
         raise RuntimeError("lease_claim omitted lease_id")
 
     try:
-        started = structured_result(
-            await session.call_tool(
-                "run_next",
-                {
-                    "schema_version": 1,
-                    "project_id": project_id,
-                    "owner": "authenticated",
-                    "lease_id": lease_id,
-                    "runner": "render-project",
-                    "idempotency_key": f"http-e2e-render-{suffix}",
-                },
-            ),
-            "run_next render-project",
-        )
-        job_id = nested_string(started, "job_id")
+        if existing_job_id is None:
+            started = structured_result(
+                await session.call_tool(
+                    "run_next",
+                    {
+                        "schema_version": 1,
+                        "project_id": project_id,
+                        "owner": "authenticated",
+                        "lease_id": lease_id,
+                        "runner": "render-project",
+                        "idempotency_key": f"http-e2e-render-{suffix}",
+                    },
+                ),
+                "run_next render-project",
+            )
+            job_id = nested_string(started, "job_id")
+        else:
+            job_id = existing_job_id
         if job_id is None or not re.fullmatch(r"[0-9a-f]{32}", job_id):
             raise RuntimeError("render submission omitted canonical job_id")
 
@@ -968,7 +977,10 @@ async def render_and_export(session: ClientSession, project_id: str) -> None:
         )
         if exported.get("outcome") != "ok":
             raise RuntimeError("export_delivery did not complete")
-        print(f"PASS: authenticated render job {job_id} succeeded and exported")
+        if existing_job_id is None:
+            print(f"PASS: authenticated render submission {job_id} succeeded and exported")
+        else:
+            print(f"PASS: authenticated read/export of existing render job {job_id}")
     finally:
         released = await session.call_tool(
             "lease_release",
@@ -1102,6 +1114,7 @@ async def exercise_gateway(
     project_id: str,
     fake_backend: bool,
     render_project: bool,
+    existing_job_id: str | None,
 ) -> None:
     read_execute_token = await authorization_code_token(fixture, config, ca_path)
     review_only_token = fixture.token((REVIEW_SCOPE,))
@@ -1182,7 +1195,11 @@ async def exercise_gateway(
         if render_project:
             if fake_backend:
                 raise RuntimeError("render mode requires an isolated installed backend")
-            await render_and_export(session, project_id)
+            await render_and_export(
+                session,
+                project_id,
+                existing_job_id=existing_job_id,
+            )
 
     async with sdk_session(config.resource_url, review_only_token, ca_path) as session:
         names = {tool.name for tool in (await session.list_tools()).tools}
@@ -1262,6 +1279,7 @@ async def run_tls_integration(
     project_id: str,
     fake_backend: bool,
     render_project: bool,
+    existing_job_id: str | None,
 ) -> None:
     jwks_client = httpx.AsyncClient(
         verify=str(ca_path), trust_env=False, timeout=5.0, follow_redirects=False
@@ -1306,6 +1324,7 @@ async def run_tls_integration(
                     project_id=project_id,
                     fake_backend=fake_backend,
                     render_project=render_project,
+                    existing_job_id=existing_job_id,
                 )
             finally:
                 await asyncio.to_thread(proxy.stop)
@@ -1327,11 +1346,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PROJECT_ID",
         help="submit/poll one real render and export; requires --context and a released project lease",
     )
+    parser.add_argument(
+        "--existing-job-id",
+        help="poll/export a previously accepted canonical render job without submitting another",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.existing_job_id is not None and (
+        args.render_project is None
+        or re.fullmatch(r"[0-9a-f]{32}", args.existing_job_id) is None
+    ):
+        print("PENDING: --existing-job-id requires render mode and a canonical job ID", file=sys.stderr)
+        return 2
     tls_port = unused_loopback_port()
     callback_port = unused_loopback_port()
     resource_url = f"https://localhost:{tls_port}/mcp"
@@ -1397,6 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_id=project_id,
                     fake_backend=fake_backend,
                     render_project=args.render_project is not None,
+                    existing_job_id=args.existing_job_id,
                 )
             )
             print("PASS: Keycloak authorization-code + PKCE S256 and exact callback checks")

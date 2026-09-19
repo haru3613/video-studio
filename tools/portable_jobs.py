@@ -278,12 +278,41 @@ def _template_authorization(project: Path) -> dict:
     return template_trust.authorize(project)
 
 
+def _parse_linux_proc_stat(value: str) -> tuple[str, str] | None:
+    # The comm field is parenthesized and may itself contain spaces or closing
+    # parentheses. Split only after its final delimiter so field 22 remains the
+    # process start time used to fence PID reuse.
+    closing = value.rfind(")")
+    if closing < 0:
+        return None
+    fields = value[closing + 1 :].split()
+    if len(fields) <= 19 or len(fields[0]) != 1 or not fields[19].isdigit():
+        return None
+    return fields[0], fields[19]
+
+
 def _process_token(pid: int) -> str | None:
+    child = _CHILDREN.get(pid)
+    if child is not None and child.poll() is not None:
+        if _CHILDREN.get(pid) is child:
+            _CHILDREN.pop(pid, None)
+        return None
     if sys.platform.startswith("linux"):
         try:
-            fields = Path(f"/proc/{pid}/stat").read_text().split()
-            return f"linux:{fields[21]}"
-        except (OSError, IndexError):
+            parsed = _parse_linux_proc_stat(
+                Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            )
+            if parsed is None:
+                return None
+            state, started_at = parsed
+            if state in {"Z", "X", "x"}:
+                child = _CHILDREN.get(pid)
+                if child is not None and child.poll() is not None:
+                    if _CHILDREN.get(pid) is child:
+                        _CHILDREN.pop(pid, None)
+                return None
+            return f"linux:{started_at}"
+        except OSError:
             return None
     try:
         result = subprocess.run(

@@ -63,6 +63,96 @@ def test_real_inbox_file_is_copied_and_hash_bound(studio):
     assert staged["sha256"] == __import__("hashlib").sha256(payload).hexdigest()
 
 
+def test_stage_is_privately_bound_to_workspace_project_and_owner(studio):
+    workspace, project = studio
+    staged = artifact_intake.stage_text(
+        workspace, project, "metadata", '{"bound":true}', "principal-a"
+    )
+    assert "owner" not in staged
+    manifest = json.loads(
+        (project / staged["blob"]).with_name("manifest.json").read_text()
+    )
+    assert manifest["schema"] == artifact_intake.STORED_STAGE_SCHEMA
+    assert manifest["workspace_id"] == json.loads(
+        (workspace / "workspace.json").read_text()
+    )["workspace_id"]
+    assert manifest["project_scope"] == "demo"
+    assert manifest["owner"] == "principal-a"
+    assert manifest["expires_at"] - manifest["created_at"] == 24 * 60 * 60
+
+    with pytest.raises(artifact_intake.IntakeError, match="stage_owner_mismatch"):
+        artifact_intake.resolve_stage(
+            workspace, project, staged["stage_id"], "principal-b"
+        )
+    with pytest.raises(artifact_intake.IntakeError, match="stage_owner_mismatch"):
+        artifact_intake.import_stage(
+            workspace, project, staged["stage_id"], "principal-b"
+        )
+    assert artifact_intake.resolve_stage(
+        workspace, project, staged["stage_id"], "principal-a"
+    ) == staged
+
+
+def test_expired_stage_is_refused_and_cleaned_during_next_stage(studio):
+    workspace, project = studio
+    staged = artifact_intake.stage_text(
+        workspace, project, "metadata", '{"old":true}', "principal-a"
+    )
+    directory = (project / staged["blob"]).parent
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["created_at"] = 0
+    manifest["expires_at"] = artifact_intake.STAGE_TTL_SECONDS
+    os.chmod(directory, 0o755)
+    os.chmod(manifest_path, 0o644)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(artifact_intake.IntakeError, match="stage_expired"):
+        artifact_intake.resolve_stage(
+            workspace, project, staged["stage_id"], "principal-a"
+        )
+
+    artifact_intake.stage_text(
+        workspace, project, "metadata", '{"new":true}', "principal-a"
+    )
+    assert not directory.exists()
+
+
+def test_project_stage_quota_is_enforced_after_expiry_cleanup(studio, monkeypatch):
+    workspace, project = studio
+    monkeypatch.setattr(artifact_intake, "PROJECT_STAGE_QUOTA", 7)
+    artifact_intake.stage_text(
+        workspace, project, "metadata", '{"a":1}', "principal-a"
+    )
+    with pytest.raises(artifact_intake.IntakeError, match="stage_quota_exceeded"):
+        artifact_intake.stage_text(
+            workspace, project, "metadata", '{"b":2}', "principal-a"
+        )
+
+
+def test_legacy_unbound_stage_is_rejected(studio):
+    workspace, project = studio
+    staged = artifact_intake.stage_text(workspace, project, "metadata", '{"ok":true}')
+    directory = (project / staged["blob"]).parent
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for key in (
+        "workspace_id",
+        "project_scope",
+        "owner",
+        "created_at",
+        "expires_at",
+    ):
+        manifest.pop(key)
+    manifest["schema"] = artifact_intake.STAGE_SCHEMA
+    os.chmod(directory, 0o755)
+    os.chmod(manifest_path, 0o644)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(artifact_intake.IntakeError, match="stage_invalid"):
+        artifact_intake.resolve_stage(workspace, project, staged["stage_id"])
+
+
 @pytest.mark.parametrize("value", ["/etc/passwd", "../outside.png", "nested/../../outside.png"])
 def test_absolute_and_traversal_inbox_paths_are_rejected_without_state(studio, value):
     workspace, project = studio

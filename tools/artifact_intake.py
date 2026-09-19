@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -19,12 +20,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workspace_barrier
 
 STAGE_SCHEMA = "video_studio.artifact_stage.v1"
+STORED_STAGE_SCHEMA = "video_studio.artifact_stage.v2"
 IMPORT_SCHEMA = "video_studio.artifact_import.v1"
 MANIFEST_SCHEMA = "video-studio.import_manifest.v1"
 STAGE_ID = re.compile(r"[0-9a-f]{32}")
 REQUEST_ID = STAGE_ID
 PROJECT_ID = re.compile(r"[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?")
 INLINE_LIMIT = 1024 * 1024
+STAGE_TTL_SECONDS = 24 * 60 * 60
+PROJECT_STAGE_QUOTA = 100 * 1024 * 1024
+LOCAL_OPERATOR = "local-operator"
 
 ROLE_RULES = {
     "source_video": ({".mp4", ".mov", ".webm"}, 512 * 1024 * 1024, "media"),
@@ -222,40 +227,165 @@ def _stage_root(project: Path) -> Path:
     return _direct_directory(intake)
 
 
-def _stage_bytes(project: Path, role: str, extension: str, payload: bytes) -> dict:
+def _owner(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or any(ord(character) < 0x20 for character in value)
+    ):
+        raise IntakeError("invalid_owner")
+    return value
+
+
+def _stage_binding(workspace: Path, project: Path, owner: str) -> tuple[str, str, str]:
+    try:
+        workspace_id = json.loads(
+            (workspace / "workspace.json").read_text(encoding="utf-8")
+        )["workspace_id"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise IntakeError("invalid_workspace") from error
+    return workspace_id, project.name, _owner(owner)
+
+
+def _stage_id(
+    workspace_id: str,
+    project_scope: str,
+    owner: str,
+    role: str,
+    extension: str,
+    digest: str,
+) -> str:
+    binding = "\0".join(
+        (workspace_id, project_scope, owner, role, extension, digest)
+    ).encode()
+    return hashlib.sha256(binding).hexdigest()[:32]
+
+
+def _public_stage(value: dict) -> dict:
+    return {
+        "schema": STAGE_SCHEMA,
+        "stage_id": value["stage_id"],
+        "role": value["role"],
+        "extension": value["extension"],
+        "sha256": value["sha256"],
+        "bytes": value["bytes"],
+        "blob": value["blob"],
+    }
+
+
+def _cleanup_expired_stages(
+    workspace: Path, project: Path, root: Path, now: int
+) -> None:
+    for directory in root.iterdir():
+        if (
+            STAGE_ID.fullmatch(directory.name) is None
+            or directory.is_symlink()
+            or not directory.is_dir()
+        ):
+            continue
+        manifest = directory / "manifest.json"
+        blob = directory / "blob"
+        if (
+            manifest.is_symlink()
+            or blob.is_symlink()
+            or not manifest.is_file()
+            or not blob.is_file()
+        ):
+            continue
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        expires_at = value.get("expires_at") if isinstance(value, dict) else None
+        if not (
+            isinstance(value, dict)
+            and isinstance(expires_at, int)
+            and not isinstance(expires_at, bool)
+            and expires_at <= now
+        ):
+            continue
+        try:
+            verified = _read_stage_manifest(
+                workspace,
+                project,
+                directory.name,
+                value.get("owner"),
+                now,
+                allow_expired=True,
+            )
+        except IntakeError:
+            continue
+        if verified["expires_at"] <= now:
+            os.chmod(directory, 0o700)
+            shutil.rmtree(directory)
+
+
+def _staged_bytes(root: Path) -> int:
+    total = 0
+    for directory in root.iterdir():
+        if STAGE_ID.fullmatch(directory.name) is None:
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise IntakeError("stage_invalid")
+        blob = directory / "blob"
+        if blob.is_symlink() or not blob.is_file():
+            raise IntakeError("stage_invalid")
+        total += blob.stat().st_size
+    return total
+
+
+def _stage_bytes(
+    workspace: Path,
+    project: Path,
+    owner: str,
+    role: str,
+    extension: str,
+    payload: bytes,
+) -> dict:
     _validate_payload(role, extension, payload)
     digest = hashlib.sha256(payload).hexdigest()
-    stage_id = hashlib.sha256(f"{role}\0{extension}\0{digest}".encode()).hexdigest()[:32]
+    workspace_id, project_scope, owner = _stage_binding(workspace, project, owner)
+    stage_id = _stage_id(
+        workspace_id, project_scope, owner, role, extension, digest
+    )
     root = _stage_root(project)
     destination = root / stage_id
+    now = int(time.time())
     manifest_value = {
-        "schema": STAGE_SCHEMA,
+        "schema": STORED_STAGE_SCHEMA,
         "stage_id": stage_id,
+        "workspace_id": workspace_id,
+        "project_scope": project_scope,
+        "owner": owner,
         "role": role,
         "extension": extension,
         "sha256": digest,
         "bytes": len(payload),
         "blob": f".hvp/staging/intake/{stage_id}/blob",
+        "created_at": now,
+        "expires_at": now + STAGE_TTL_SECONDS,
     }
     lock = project / ".hvp/intake.lock"
     with lock.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        return _commit_stage(project, root, destination, stage_id, manifest_value, payload)
+        _cleanup_expired_stages(workspace, project, root, now)
+        if destination.exists():
+            return _public_stage(
+                _read_stage_manifest(workspace, project, stage_id, owner, now)
+            )
+        if _staged_bytes(root) + len(payload) > PROJECT_STAGE_QUOTA:
+            raise IntakeError("stage_quota_exceeded")
+        return _commit_stage(project, root, destination, manifest_value, payload)
 
 
 def _commit_stage(
     project: Path,
     root: Path,
     destination: Path,
-    stage_id: str,
     manifest_value: dict,
     payload: bytes,
 ) -> dict:
-    if destination.exists():
-        existing = _read_stage(project, stage_id)
-        if existing != manifest_value:
-            raise IntakeError("stage_conflict")
-        return existing
     temporary = Path(tempfile.mkdtemp(prefix=".intake-", dir=root))
     try:
         blob = temporary / "blob"
@@ -279,12 +409,21 @@ def _commit_stage(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return manifest_value
+    return _public_stage(manifest_value)
 
 
-def _read_stage(project: Path, stage_id: str) -> dict:
+def _read_stage_manifest(
+    workspace: Path,
+    project: Path,
+    stage_id: str,
+    owner: str,
+    now: int | None = None,
+    *,
+    allow_expired: bool = False,
+) -> dict:
     if STAGE_ID.fullmatch(stage_id) is None:
         raise IntakeError("invalid_stage_id")
+    workspace_id, project_scope, owner = _stage_binding(workspace, project, owner)
     root = project / ".hvp/staging/intake"
     if root.is_symlink() or not root.is_dir():
         raise IntakeError("stage_not_found")
@@ -300,8 +439,17 @@ def _read_stage(project: Path, stage_id: str) -> dict:
         value = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise IntakeError("stage_invalid") from error
-    if value.get("schema") != STAGE_SCHEMA or value.get("stage_id") != stage_id:
+    if not isinstance(value, dict) or value.get("schema") != STORED_STAGE_SCHEMA:
         raise IntakeError("stage_invalid")
+    if value.get("stage_id") != stage_id:
+        raise IntakeError("stage_invalid")
+    if (
+        value.get("workspace_id") != workspace_id
+        or value.get("project_scope") != project_scope
+    ):
+        raise IntakeError("stage_invalid")
+    if value.get("owner") != owner:
+        raise IntakeError("stage_owner_mismatch")
     if value.get("blob") != f".hvp/staging/intake/{stage_id}/blob":
         raise IntakeError("stage_invalid")
     if not isinstance(value.get("sha256"), str) or re.fullmatch(
@@ -310,31 +458,70 @@ def _read_stage(project: Path, stage_id: str) -> dict:
         raise IntakeError("stage_invalid")
     if not isinstance(value.get("bytes"), int) or isinstance(value.get("bytes"), bool):
         raise IntakeError("stage_invalid")
+    created_at = value.get("created_at")
+    expires_at = value.get("expires_at")
+    if (
+        not isinstance(created_at, int)
+        or isinstance(created_at, bool)
+        or not isinstance(expires_at, int)
+        or isinstance(expires_at, bool)
+        or expires_at != created_at + STAGE_TTL_SECONDS
+    ):
+        raise IntakeError("stage_invalid")
+    if not allow_expired and expires_at <= (int(time.time()) if now is None else now):
+        raise IntakeError("stage_expired")
     _extensions, limit, _kind = _validate_role(value.get("role"))
     payload = _read_bounded(blob, limit)
     if hashlib.sha256(payload).hexdigest() != value.get("sha256") or len(payload) != value.get("bytes"):
         raise IntakeError("stage_invalid")
     _validate_payload(value.get("role"), value.get("extension"), payload)
+    expected_id = _stage_id(
+        workspace_id,
+        project_scope,
+        owner,
+        value["role"],
+        value["extension"],
+        value["sha256"],
+    )
+    if expected_id != stage_id:
+        raise IntakeError("stage_invalid")
     return value
 
 
-def stage_inbox(workspace_value: Path, project_value: Path, role: str, relative: str) -> dict:
+def stage_inbox(
+    workspace_value: Path,
+    project_value: Path,
+    role: str,
+    relative: str,
+    owner: str = LOCAL_OPERATOR,
+) -> dict:
     workspace = _workspace(workspace_value)
     project = _project(workspace, project_value)
     with workspace_barrier.mutation_barrier(project):
         source = _relative_file(workspace / "inbox", relative)
         extensions, limit, _kind = _validate_role(role)
         extension = source.suffix.lower()
-        if extension not in extensions or source.stat().st_size > limit:
+        size = source.stat().st_size
+        if extension not in extensions or size > limit:
             raise IntakeError(
                 "artifact_too_large"
-                if source.stat().st_size > limit
+                if size > limit
                 else "artifact_type_invalid"
             )
-        return _stage_bytes(project, role, extension, _read_bounded(source, limit))
+        if size > PROJECT_STAGE_QUOTA:
+            raise IntakeError("stage_quota_exceeded")
+        return _stage_bytes(
+            workspace, project, owner, role, extension, _read_bounded(source, limit)
+        )
 
 
-def stage_text(workspace_value: Path, project_value: Path, role: str, text: str) -> dict:
+def stage_text(
+    workspace_value: Path,
+    project_value: Path,
+    role: str,
+    text: str,
+    owner: str = LOCAL_OPERATOR,
+) -> dict:
     workspace = _workspace(workspace_value)
     project = _project(workspace, project_value)
     with workspace_barrier.mutation_barrier(project):
@@ -343,11 +530,15 @@ def stage_text(workspace_value: Path, project_value: Path, role: str, text: str)
         payload = text.encode("utf-8")
         if len(payload) > INLINE_LIMIT:
             raise IntakeError("artifact_too_large")
-        return _stage_bytes(project, role, INLINE_ROLES[role], payload)
+        return _stage_bytes(workspace, project, owner, role, INLINE_ROLES[role], payload)
 
 
 def stage_inline_request(
-    workspace_value: Path, project_value: Path, role: str, request_id: str
+    workspace_value: Path,
+    project_value: Path,
+    role: str,
+    request_id: str,
+    owner: str = LOCAL_OPERATOR,
 ) -> dict:
     workspace = _workspace(workspace_value)
     project = _project(workspace, project_value)
@@ -370,40 +561,47 @@ def stage_inline_request(
             payload.decode("utf-8")
         except UnicodeError as error:
             raise IntakeError("artifact_type_invalid") from error
-        staged = _stage_bytes(project, role, INLINE_ROLES[role], payload)
+        staged = _stage_bytes(
+            workspace, project, owner, role, INLINE_ROLES[role], payload
+        )
         request.unlink()
         return staged
 
 
-def import_stage(workspace_value: Path, project_value: Path, stage_id: str) -> dict:
+def import_stage(
+    workspace_value: Path,
+    project_value: Path,
+    stage_id: str,
+    owner: str = LOCAL_OPERATOR,
+) -> dict:
     workspace = _workspace(workspace_value)
     project = _project(workspace, project_value)
     with workspace_barrier.mutation_barrier(project):
-        stage = _read_stage(project, stage_id)
-        role = stage["role"]
-        extension = stage["extension"]
-        # Every import stays in this non-canonical namespace. It can inform later
-        # production, but can never replace narration, final video or approvals.
-        relative = Path("imports") / role / f"{stage_id}{extension}"
-        imports = project / "imports"
-        if imports.is_symlink():
-            raise IntakeError("import_conflict")
-        imports.mkdir(exist_ok=True)
-        role_root = imports / role
-        if role_root.is_symlink():
-            raise IntakeError("import_conflict")
-        role_root.mkdir(exist_ok=True)
-        try:
-            role_root.resolve(strict=True).relative_to(project)
-        except (OSError, ValueError) as error:
-            raise IntakeError("import_conflict") from error
-        target = role_root / f"{stage_id}{extension}"
-        if target.is_symlink():
-            raise IntakeError("import_conflict")
-        source = project / stage["blob"]
         lock = project / ".hvp/intake.lock"
         with lock.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            stage = _read_stage_manifest(workspace, project, stage_id, owner)
+            role = stage["role"]
+            extension = stage["extension"]
+            # Every import stays in this non-canonical namespace. It can inform later
+            # production, but can never replace narration, final video or approvals.
+            relative = Path("imports") / role / f"{stage_id}{extension}"
+            imports = project / "imports"
+            if imports.is_symlink():
+                raise IntakeError("import_conflict")
+            imports.mkdir(exist_ok=True)
+            role_root = imports / role
+            if role_root.is_symlink():
+                raise IntakeError("import_conflict")
+            role_root.mkdir(exist_ok=True)
+            try:
+                role_root.resolve(strict=True).relative_to(project)
+            except (OSError, ValueError) as error:
+                raise IntakeError("import_conflict") from error
+            target = role_root / f"{stage_id}{extension}"
+            if target.is_symlink():
+                raise IntakeError("import_conflict")
+            source = project / stage["blob"]
             if target.exists():
                 if (
                     not target.is_file()
@@ -464,10 +662,15 @@ def import_stage(workspace_value: Path, project_value: Path, stage_id: str) -> d
         return {"schema": IMPORT_SCHEMA, **record}
 
 
-def resolve_stage(workspace_value: Path, project_value: Path, stage_id: str) -> dict:
+def resolve_stage(
+    workspace_value: Path,
+    project_value: Path,
+    stage_id: str,
+    owner: str = LOCAL_OPERATOR,
+) -> dict:
     workspace = _workspace(workspace_value)
     project = _project(workspace, project_value)
-    return _read_stage(project, stage_id)
+    return _public_stage(_read_stage_manifest(workspace, project, stage_id, owner))
 
 
 def envelope(project, outcome, code, data=None):
@@ -482,31 +685,39 @@ def envelope(project, outcome, code, data=None):
 
 def main(argv):
     action = argv[1] if len(argv) > 1 else ""
-    valid = action in {"stage-inbox", "stage-text", "stage-inline-file"} and len(argv) == 6
-    valid = valid or (action in {"import", "resolve"} and len(argv) == 5)
+    stage_action = action in {"stage-inbox", "stage-text", "stage-inline-file"}
+    valid = stage_action and len(argv) in {6, 7}
+    valid = valid or (action in {"import", "resolve"} and len(argv) in {5, 6})
     if not valid:
         print(json.dumps(envelope(None, "error", "invalid_input"), separators=(",", ":")))
         return 2
     project = Path(argv[3])
+    owner_index = 6 if stage_action else 5
+    owner = argv[owner_index] if len(argv) > owner_index else LOCAL_OPERATOR
     try:
         if action == "stage-inbox":
-            data = stage_inbox(Path(argv[2]), project, argv[4], argv[5])
+            data = stage_inbox(Path(argv[2]), project, argv[4], argv[5], owner)
             code = "artifact_staged"
         elif action == "stage-text":
-            data = stage_text(Path(argv[2]), project, argv[4], argv[5])
+            data = stage_text(Path(argv[2]), project, argv[4], argv[5], owner)
             code = "artifact_staged"
         elif action == "stage-inline-file":
-            data = stage_inline_request(Path(argv[2]), project, argv[4], argv[5])
+            data = stage_inline_request(Path(argv[2]), project, argv[4], argv[5], owner)
             code = "artifact_staged"
         elif action == "import":
-            data = import_stage(Path(argv[2]), project, argv[4])
+            data = import_stage(Path(argv[2]), project, argv[4], owner)
             code = "artifact_imported"
         else:
-            data = resolve_stage(Path(argv[2]), project, argv[4])
+            data = resolve_stage(Path(argv[2]), project, argv[4], owner)
             code = "artifact_staged"
         response, exit_code = envelope(project.resolve(), "ok", code, data), 0
     except IntakeError as error:
-        outcome = "blocked" if error.code in {"stage_conflict", "import_conflict"} else "error"
+        outcome = (
+            "blocked"
+            if error.code
+            in {"stage_conflict", "import_conflict", "stage_quota_exceeded"}
+            else "error"
+        )
         exit_code = 3 if outcome == "blocked" else 2
         response = envelope(project, outcome, error.code)
     except (OSError, TypeError, ValueError):
