@@ -171,5 +171,5 @@
     "credentials",
     "private Git history"
   ],
-  "status": "original core import; portability and public configuration under implementation"
+  "status": "source extracted; portable interfaces implemented and reviewed; source-only release and license pending"
 }

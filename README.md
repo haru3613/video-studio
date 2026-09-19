@@ -4,9 +4,9 @@ Self-hosted video-production workflows for people and AI agents. Run the same
 workflow from a CLI, a local stdio MCP server, or an authenticated HTTP MCP
 server on your own machine. Video Studio does not provide a cloud service.
 
-This is a development release candidate. The implementation is undergoing
-end-to-end verification and code review; see [validation](docs/validation.md)
-for the current evidence and remaining work. License selection is pending.
+This is a development release candidate. Implementation and code review are
+complete; see [validation](docs/validation.md) for tested workflows and limits.
+The repository remains private pending the owner's license selection.
 
 ## What it does
 

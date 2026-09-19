@@ -1,58 +1,91 @@
 # Validation evidence
 
-Status: implementation candidate under active integration and review.
+The implementation and requested code review are complete. This remains a
+private, source-only release candidate pending the owner's license selection.
 No production account, original Haru runtime, or public channel was modified.
 
-The source was extracted from Studio commit
-`18723997707e500d48c6c752cf56970fa51700c1` and media-tools commit
-`6bd0414736dbb63a6dad8ec55b86116317d50119`. Subsequent work generalizes operator
-configuration and installation while preserving the production schemas and
-quality gates. New local delivery is explicitly separate from publication.
+## Candidate and source checks
 
-Pre-review integrated source verification completed with 117 Rust tests,
-624 Python tests plus 81 subtests, and 18 Swift tests. A clean installation of
-`8ea6c3f9158a5d3c9e74f7b56814428a4320843c` succeeded with an isolated runtime
-home and shared compiler/package caches; stale Haru runtime override variables
-were ignored. This is not a claim of a new-machine install with no shared cache.
+The executable candidate is `0f609a0`; subsequent documentation and CI edits
+do not change its runtime closure. Source provenance is recorded in
+[source-import.json](source-import.json) and the media-tools provenance file.
 
-The requested first independent review of `c67feba` returned **FAIL**. Work is
-continuing on HTTP intake, complete installed CLI operations, durable provider
-spend, diagnostic delivery, media history, and generic operator profiles. Scope
-was reconciled with the user's later request to preserve existing workflows.
-No release-complete claim has been made.
+On macOS arm64, `scripts/verify` passed with:
 
-Recorded slice evidence (not a substitute for the final integrated candidate):
+- 129 Rust tests, with rustfmt and clippy (`-D warnings`).
+- 701 Python tests plus 83 subtests.
+- 18 Swift fake-key tests.
+- Python compilation, shell syntax, dashboard JavaScript checks and diff checks.
 
-- Real immutable self-build installation, verification, corrupt/stale runtime
-  refusal, and collision refusal for unrelated existing launchers.
-- Original Rust workflow regression suites and complete typed CLI/MCP surface.
-- Cross-platform process supervision tests using real FFmpeg: client exit,
-  cancellation, input snapshots, failed retakes, epoch fencing, and interrupted
-  promotion recovery.
-- Local technical delivery and exports with real media probes, full decode,
-  digest rechecks, and source-change refusal.
-- Real Keycloak authorization-code/PKCE, callback checks, trusted-CA Nginx TLS,
-  and official SDK HTTP-to-stdio protocol. Its backend was an isolated fixture;
-  this does not by itself prove a full real rendering workflow over HTTP.
-- Real Remotion landscape/portrait/cover template renders and clean decode.
-  Earlier adapter tests using a synthetic renderer are not counted as Remotion
-  execution evidence.
-- Real UI-created review-store fixtures, current/stale media checks, idempotent
-  note resolution, and no upgrade of comments into approval.
-- Swift key/auth tests use fakes. No hardware enrollment or human-presence
-  signing was performed. Paid TTS/STT and actual YouTube uploads remain untested.
+Two existing FastAPI/Starlette deprecation warnings remain. They do not change
+the passing result. Native macOS source verification requires Swift 6.2+;
+CI selects Xcode 26.2 explicitly.
 
-Still required before completion:
+[GitHub CI on bb97530](https://github.com/haru3613/video-studio/actions/runs/35459096385)
+passed on macOS 15 arm64 and Ubuntu 24.04 x86_64, including template install,
+content tests, TypeScript checks and example-contract tests. The later backup
+projection fix passed its 10-test focused suite and the full local suite above.
+The PR's current checks remain the authoritative receipt for its exact head.
 
-- Final `scripts/verify` receipt for the integrated tree and Linux CI.
-- Clean committed installation plus actual CLI/MCP example render, review and
-  export in an isolated workspace.
-- Browser interaction and screenshot evidence for login, playback, comments,
-  stale-version handling, and feedback retrieval.
-- Redacted secret scan of the candidate and Git history, dependency/license
-  inventory, and the requested independent Standards and Spec code reviews.
-- Owner's license selection and the final public-release readiness audit.
+## Installed workflows
 
-Local test logs and screenshots are deliberately kept outside the repository.
-This document will be updated with exact candidate commits and results rather
-than treating test configuration or implementation intent as proof.
+Clean committed installation was exercised in a separate runtime HOME, with
+shared compiler/package caches but no copied operator credentials. This is not
+a claim of an uncached new-machine installation. The managed Python environment
+and immutable self-built runtime were provisioned by `scripts/install`.
+The installed CLI worked outside the source checkout; inherited legacy runtime
+and launcher overrides did not touch their poisoned test destinations.
+
+| Workflow | Observed evidence |
+| --- | --- |
+| CLI and stdio MCP | Created a canonical project, claimed a lease, submitted a real Remotion render, polled durable state and released the lease. Installed doctor passed; the exact surface contains 34 tools. |
+| Real video | Original 24-second example text was spoken locally with eSpeak NG; the landscape Remotion composition rendered, passed FFmpeg full decode and subtitle timing checks. Separate landscape, portrait and cover template renders were checked. |
+| Authenticated HTTP MCP | On `d163877`, fresh `run_next` returned `outcome=ok`, `code=gate_started`; job `8ce54f7cabb9431094a8af03a534e4f6` reached `succeeded`. Delivery and immutable export passed, and the lease was released. |
+| HTTP authorization | Disposable Keycloak authorization-code/PKCE S256 and trusted-test-CA TLS checks passed, including issuer, audience, scope, Origin, principal binding, wrong verifier/redirect and untrusted-CA rejection. |
+| Agent client | Claude Code 2.1.260 connected to exactly one authenticated test MCP server using isolated HOME/config/cwd and the test CA. This was a health check, without model inference or an agent-driven browser OAuth callback. No real client settings were changed. |
+| Browser review | Chrome exercised one-time login, playback, seeking and a timestamped comment. After rerender, the old comment played its exact archived video and could be marked resolved. No JavaScript errors or external requests were observed. |
+| Agent feedback and delivery | Installed CLI retrieved the old comment as resolved, stale and still playable; technical status and export passed for the new final. |
+| Backup and restore | Installed CLI backed up 87 real workspace files and databases, restored into a new path, verified identical final-video bytes, and retrieved completed job history. Active-job refusal and restored process-authority invalidation have regression coverage. |
+
+The final HTTP render revision was
+`e7761161f8b2b1bbc1b4e4e799f8745420f6aa929538e86949e6119695917bab`;
+the exported bundle was
+`85cf5dea4eb0e853de05d16a369e24467d68131855565ec3cc97b99bd0fe6033`.
+Temporary Keycloak/Nginx containers and token-bearing Claude configuration were
+removed. Logs, screenshots, generated audio/video and backup files remain
+outside this repository.
+
+## Review and audit
+
+Both independent review axes passed after their findings were repaired; see
+[code-review.md](code-review.md). Actual workflow runs also exposed and repaired
+compiler-cache invalidation, unused-scaffold delivery checks, strict retake
+response validation, stale backup projections and Linux zombie detection.
+Earlier failing runs are not counted as successful submission evidence.
+
+Gitleaks 8.30.1 scanned the source candidate and reachable Git history with
+redaction enabled and reported no secrets. The additional presence-only audit
+matched one deliberately fake log-redaction fixture. Author and committer
+metadata use GitHub noreply addresses. A clean scan is evidence, not a guarantee
+that a repository can contain no secret.
+
+[Dependency audit](dependency-audit.md) records exact locked packages, licenses,
+and vulnerability coverage. Python/Rust audits and the Node OSV fallback found
+no matching known vulnerabilities. npm's official audit endpoint failed; its
+failure and the optional G2P transitive-closure gap remain explicitly recorded.
+Remotion retains its separate license terms.
+
+## Unverified or deliberately unconfigured
+
+- Paid TTS/STT, actual YouTube uploads, hardware key enrollment and human-presence
+  signing were not performed. Provider tests are offline; Swift key tests use fakes.
+- Technical delivery does not assert factual accuracy, pronunciation approval,
+  human visual acceptance or publication authority.
+- Linux CI checks source/contracts and portable process behavior. The full real
+  Remotion/browser workflow above ran on macOS, not on a Linux browser host.
+- Optional G2P models and transitive packages are externally supplied. Binary,
+  container, offline-cache and vendored-dependency distribution are not cleared
+  by this source-only audit.
+- Public release requires the owner's license/copyright decision and verified
+  public-repository security settings. No license or publication is implied by
+  this verification record.
