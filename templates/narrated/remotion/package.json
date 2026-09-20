@@ -20,13 +20,13 @@
     "@remotion/captions": "4.0.506",
     "@remotion/cli": "4.0.506",
     "@remotion/media": "4.0.506",
-    "react": "18.3.1",
+    "react": "19.3.0",
     "react-dom": "18.3.1",
     "remotion": "4.0.506"
   },
   "devDependencies": {
     "@types/node": "22.20.4",
-    "@types/react": "18.3.28",
+    "@types/react": "19.3.0",
     "typescript": "5.9.3"
   }
 }
