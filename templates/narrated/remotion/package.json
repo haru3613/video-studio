@@ -22,7 +22,7 @@
     "@remotion/media": "4.0.506",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "remotion": "4.0.506"
+    "remotion": "4.0.525"
   },
   "devDependencies": {
     "@types/node": "22.20.4",
