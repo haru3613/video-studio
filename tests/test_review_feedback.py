@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+from unittest import mock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DASHBOARD = ROOT / "tools" / "dashboard"
+if str(DASHBOARD) not in sys.path:
+    sys.path.insert(0, str(DASHBOARD))
+
+import review_api  # noqa: E402
+import version_archive  # noqa: E402
+
+
+COMMAND = ROOT / "scripts" / "review-feedback"
+
+
+def invoke(*arguments: object) -> tuple[int, dict]:
+    completed = subprocess.run(
+        [str(COMMAND), *(str(argument) for argument in arguments)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert completed.stderr == ""
+    return completed.returncode, json.loads(completed.stdout)
+
+
+def ui_comment_fixture(tmp_path: Path) -> tuple[Path, Path, dict, dict]:
+    workspace = tmp_path / "workspace"
+    project = workspace / "projects" / "episode"
+    (project / "authoring").mkdir(parents=True)
+    (project / "output").mkdir()
+    (project / "output" / "cover.png").write_bytes(b"cover-v1")
+    (project / "authoring" / "review-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.review_package.v1",
+                "title": "Episode",
+                "assets": [
+                    {
+                        "id": "cover-current",
+                        "kind": "cover",
+                        "label": "Cover",
+                        "role": "current",
+                        "path": "output/cover.png",
+                    }
+                ],
+                "changes": [],
+                "chapters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    storage = workspace / ".video-studio" / "review"
+    app = FastAPI()
+    csrf = review_api.register_review_routes(
+        app, {"studio": workspace / "projects"}, storage_root=storage
+    )
+    client = TestClient(app, base_url="http://localhost")
+    review = client.get("/api/review/studio/episode").json()
+    asset = review["assets"][0]
+    response = client.post(
+        "/api/review/studio/episode/comments",
+        json={
+            "client_id": str(uuid.uuid4()),
+            "package_id": review["package_id"],
+            "asset_id": asset["id"],
+            "asset_sha256": asset["sha256"],
+            "timestamp_seconds": None,
+            "body": "Please adjust the cover spacing.",
+        },
+        headers={"Origin": "http://localhost", "X-Haru-Review-CSRF": csrf},
+    )
+    assert response.status_code == 201, response.text
+    return workspace, project, review, response.json()["comment"]
+
+
+def ui_empty_fixture(tmp_path: Path) -> tuple[Path, Path, dict, TestClient]:
+    workspace = tmp_path / "workspace"
+    project = workspace / "projects" / "episode"
+    (project / "authoring").mkdir(parents=True)
+    (project / "output").mkdir()
+    (project / "output" / "cover.png").write_bytes(b"cover-v1")
+    (project / "authoring" / "review-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.review_package.v1",
+                "title": "Episode",
+                "assets": [
+                    {
+                        "id": "cover-current",
+                        "kind": "cover",
+                        "label": "Cover",
+                        "role": "current",
+                        "path": "output/cover.png",
+                    }
+                ],
+                "changes": [],
+                "chapters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    review_api.register_review_routes(
+        app,
+        {"studio": workspace / "projects"},
+        storage_root=workspace / ".video-studio" / "review",
+    )
+    client = TestClient(app, base_url="http://localhost")
+    return workspace, project, client.get("/api/review/studio/episode").json(), client
+
+
+def write_add_request(project: Path, request_id: str, payload: dict) -> None:
+    directory = project / ".hvp" / "review-requests"
+    directory.mkdir(parents=True, exist_ok=True)
+    request = directory / f"{request_id}.json"
+    request.write_text(
+        json.dumps({"schema": "video_studio.review_add_request.v1", **payload}),
+        encoding="utf-8",
+    )
+    request.chmod(0o400)
+
+
+def ui_video_comment_fixture(
+    tmp_path: Path,
+) -> tuple[Path, dict, dict, TestClient, str]:
+    workspace = tmp_path / "workspace"
+    project = workspace / "projects" / "episode"
+    (project / "authoring").mkdir(parents=True)
+    (project / "output").mkdir()
+    (project / "output" / "final.mp4").write_bytes(b"video-v1")
+    (project / "authoring" / "review-package.json").write_text(
+        json.dumps(
+            {
+                "schema": "haru.review_package.v1",
+                "title": "Episode",
+                "assets": [
+                    {
+                        "id": "video-current",
+                        "kind": "video",
+                        "label": "Video",
+                        "role": "current",
+                        "path": "output/final.mp4",
+                    }
+                ],
+                "changes": [],
+                "chapters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    csrf = review_api.register_review_routes(
+        app,
+        {"studio": workspace / "projects"},
+        storage_root=workspace / ".video-studio" / "review",
+    )
+    client = TestClient(app, base_url="http://localhost")
+    with mock.patch.object(review_api, "_duration", return_value=10.0):
+        review = client.get("/api/review/studio/episode").json()
+        response = client.post(
+            "/api/review/studio/episode/comments",
+            json={
+                "client_id": str(uuid.uuid4()),
+                "package_id": review["package_id"],
+                "asset_id": "video-current",
+                "asset_sha256": review["assets"][0]["sha256"],
+                "timestamp_seconds": 1.5,
+                "body": "Historical render note.",
+            },
+            headers={"Origin": "http://localhost", "X-Haru-Review-CSRF": csrf},
+        )
+    assert response.status_code == 201, response.text
+    return project, review, response.json()["comment"], client, csrf
+
+
+def test_reads_actual_ui_store_without_fastapi_or_private_state(tmp_path: Path) -> None:
+    workspace, project, review, created = ui_comment_fixture(tmp_path)
+    code, result = invoke("read", project)
+
+    assert code == 0
+    assert result["schema"] == "video_studio.review_feedback.v1"
+    assert result["package_id"] == review["package_id"]
+    assert result["assets"][0]["id"] == "cover-current"
+    assert result["assets"][0]["sha256"] == review["assets"][0]["sha256"]
+    assert result["counts"] == {"total": 1, "open": 1, "resolved": 0, "stale": 0}
+    comment = result["comments"][0]
+    assert comment["id"] == created["id"]
+    assert comment["status"] == "open"
+    assert comment["is_current"] is True
+    assert comment["asset_available"] is True
+    assert comment["stale"] is False
+    serialized = json.dumps(result)
+    assert str(workspace) not in serialized
+    assert "csrf" not in serialized.lower()
+    assert "session" not in serialized.lower()
+
+    store = next((workspace / ".video-studio" / "review").glob("*/feedback.json"))
+    assert json.loads(store.read_text(encoding="utf-8"))["schema"] == "haru.review_feedback.v1"
+
+
+def test_cli_add_uses_shared_ui_domain_and_is_idempotent(tmp_path: Path) -> None:
+    _, project, review, client = ui_empty_fixture(tmp_path)
+    request_id = "a" * 32
+    client_id = str(uuid.uuid4())
+    payload = {
+        "client_id": client_id,
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Please adjust the cover spacing.",
+    }
+    write_add_request(project, request_id, payload)
+
+    code, added = invoke("add", project, "--request-id", request_id)
+    assert code == 0
+    assert added["schema"] == "video_studio.review_add.v1"
+    assert added["code"] == "review_comment_added"
+    assert added["comment"]["asset"]["id"] == "cover-current"
+    assert added["effects"] == {
+        "technical_qa_pass": False,
+        "human_approval": False,
+        "publishing_approval": False,
+    }
+
+    code, repeated = invoke("add", project, "--request-id", request_id)
+    assert code == 0
+    assert repeated["code"] == "review_comment_existing"
+    assert repeated["comment"]["id"] == added["comment"]["id"]
+    ui_review = client.get("/api/review/studio/episode").json()
+    assert ui_review["comments"][0]["id"] == added["comment"]["id"]
+    assert ui_review["comments"][0]["body"] == payload["body"]
+
+
+def test_cli_add_rejects_stale_asset_and_unsafe_request_file(tmp_path: Path) -> None:
+    _, project, review, _client = ui_empty_fixture(tmp_path)
+    payload = {
+        "client_id": str(uuid.uuid4()),
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Current bytes only.",
+    }
+    request_id = "b" * 32
+    write_add_request(project, request_id, payload)
+    (project / "output" / "cover.png").write_bytes(b"changed")
+    code, stale = invoke("add", project, "--request-id", request_id)
+    assert code == 3
+    assert stale["code"] == "review_stale"
+
+    unsafe_id = "c" * 32
+    write_add_request(project, unsafe_id, payload)
+    (project / ".hvp/review-requests" / f"{unsafe_id}.json").chmod(0o644)
+    code, unsafe = invoke("add", project, "--request-id", unsafe_id)
+    assert code == 2
+    assert unsafe["code"] == "review_request_invalid"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"client_id": "12345678-1234-1234-1234-123456789ABC"},
+        {"body": "x" * 5001},
+        {"timestamp_seconds": float("nan")},
+        {"timestamp_seconds": 0},
+    ],
+)
+def test_cli_add_rejects_invalid_uuid_body_and_cover_timestamp(
+    tmp_path: Path, override: dict
+) -> None:
+    _, project, review, _client = ui_empty_fixture(tmp_path)
+    payload = {
+        "client_id": str(uuid.uuid4()),
+        "package_id": review["package_id"],
+        "asset_id": "cover-current",
+        "asset_sha256": review["assets"][0]["sha256"],
+        "timestamp_seconds": None,
+        "body": "Valid comment",
+        **override,
+    }
+    request_id = uuid.uuid4().hex
+    write_add_request(project, request_id, payload)
+
+    code, result = invoke("add", project, "--request-id", request_id)
+
+    assert code == 2
+    assert result["code"] == "invalid_input"
+
+
+def test_resolve_and_reopen_are_bound_idempotent_review_only_changes(tmp_path: Path) -> None:
+    workspace, project, review, created = ui_comment_fixture(tmp_path)
+    before_files = {
+        path.relative_to(project).as_posix()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    args = (
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "resolved",
+        "--expected-package-id",
+        review["package_id"],
+        "--expected-asset-sha256",
+        created["asset"]["sha256"],
+    )
+    code, resolved = invoke(*args)
+    assert code == 0
+    assert resolved["code"] == "review_comment_updated"
+    assert resolved["comment"]["status"] == "resolved"
+    assert resolved["effects"] == {
+        "technical_qa_pass": False,
+        "human_approval": False,
+        "publishing_approval": False,
+    }
+    updated_at = resolved["comment"]["updated_at"]
+
+    code, repeated = invoke(*args)
+    assert code == 0
+    assert repeated["code"] == "review_comment_unchanged"
+    assert repeated["comment"]["updated_at"] == updated_at
+
+    after_files = {
+        path.relative_to(project).as_posix()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    assert after_files == before_files
+    assert not (project / "quality-review").exists()
+    assert not (project / "publish").exists()
+
+
+def test_historical_comment_can_be_reopened_only_with_its_persisted_bindings(
+    tmp_path: Path,
+) -> None:
+    _, project, review, created = ui_comment_fixture(tmp_path)
+    resolve_args = (
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "resolved",
+        "--expected-package-id",
+        review["package_id"],
+        "--expected-asset-sha256",
+        created["asset"]["sha256"],
+    )
+    assert invoke(*resolve_args)[0] == 0
+
+    cover = project / "output" / "cover.png"
+    cover.write_bytes(b"cover-v2")
+    code, current = invoke("read", project)
+    assert code == 0
+    assert current["comments"][0]["stale"] is True
+    assert current["comments"][0]["is_current"] is False
+    assert current["comments"][0]["asset_available"] is False
+
+    reopen_args = (
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "open",
+        "--expected-package-id",
+        created["package_id"],
+        "--expected-asset-sha256",
+        created["asset"]["sha256"],
+    )
+    current_digest = current["assets"][0]["sha256"]
+    code, conflict = invoke(
+        *reopen_args[:-1],
+        current_digest,
+    )
+    assert code == 3
+    assert conflict["code"] == "review_conflict"
+
+    code, reopened = invoke(*reopen_args)
+    assert code == 0
+    assert reopened["comment"]["status"] == "open"
+    feedback = invoke("read", project)[1]
+    assert feedback["comments"][0]["status"] == "open"
+    assert feedback["comments"][0]["stale"] is True
+
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"cover-v1")
+    cover.unlink()
+    cover.symlink_to(outside)
+    code, symlinked = invoke("read", project)
+    assert code == 0
+    assert symlinked["comments"][0]["stale"] is True
+    assert symlinked["comments"][0]["status"] == "open"
+    assert str(outside) not in json.dumps(symlinked)
+
+
+def test_archived_render_comment_resolves_and_remains_stale_in_cli_feedback(
+    tmp_path: Path,
+) -> None:
+    project, review, created, _client, _csrf = ui_video_comment_fixture(tmp_path)
+    video = project / "output" / "final.mp4"
+    archived = version_archive.preserve_video(video)
+    replacement = project / "output" / "replacement.mp4"
+    replacement.write_bytes(b"video-v2")
+    replacement.replace(video)
+    assert archived.read_bytes() == b"video-v1"
+
+    code, before = invoke("read", project)
+    assert code == 0
+    assert before["comments"][0]["stale"] is True
+    assert before["comments"][0]["asset_available"] is True
+
+    common = [
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "resolved",
+        "--expected-package-id",
+        created["package_id"],
+        "--expected-asset-sha256",
+    ]
+    current_digest = before["assets"][0]["sha256"]
+    code, conflict = invoke(*common, current_digest)
+    assert code == 3
+    assert conflict["code"] == "review_conflict"
+
+    code, resolved = invoke(*common, created["asset"]["sha256"])
+    assert code == 0
+    assert resolved["comment"]["status"] == "resolved"
+    assert resolved["comment"]["stale"] is True
+    assert resolved["effects"] == {
+        "technical_qa_pass": False,
+        "human_approval": False,
+        "publishing_approval": False,
+    }
+
+    code, feedback = invoke("read", project)
+    assert code == 0
+    assert feedback["comments"][0]["status"] == "resolved"
+    assert feedback["comments"][0]["stale"] is True
+    assert feedback["comments"][0]["asset_available"] is True
+
+
+def test_ui_patch_uses_historical_comment_bindings_after_rerender(tmp_path: Path) -> None:
+    project, _review, created, client, csrf = ui_video_comment_fixture(tmp_path)
+    video = project / "output" / "final.mp4"
+    version_archive.preserve_video(video)
+    replacement = project / "output" / "replacement.mp4"
+    replacement.write_bytes(b"video-v2")
+    replacement.replace(video)
+
+    response = client.patch(
+        f"/api/review/studio/episode/comments/{created['id']}",
+        json={"status": "resolved"},
+        headers={"Origin": "http://localhost", "X-Haru-Review-CSRF": csrf},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["comment"]["status"] == "resolved"
+    code, feedback = invoke("read", project)
+    assert code == 0
+    assert feedback["comments"][0]["status"] == "resolved"
+    assert feedback["comments"][0]["stale"] is True
+
+
+def test_read_does_not_create_review_state(tmp_path: Path) -> None:
+    project = tmp_path / "workspace" / "projects" / "empty"
+    project.mkdir(parents=True)
+    state = tmp_path / "workspace" / ".video-studio" / "review"
+
+    code, result = invoke("read", project)
+
+    assert code == 0
+    assert result["comments"] == []
+    assert result["counts"] == {"total": 0, "open": 0, "resolved": 0, "stale": 0}
+    assert not state.exists()
+
+
+def test_conflicting_package_or_asset_digest_does_not_mutate(tmp_path: Path) -> None:
+    _, project, review, created = ui_comment_fixture(tmp_path)
+    base = [
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        "resolved",
+    ]
+    code, package_conflict = invoke(
+        *base,
+        "--expected-package-id",
+        "0" * 64,
+        "--expected-asset-sha256",
+        created["asset"]["sha256"],
+    )
+    assert code == 3
+    assert package_conflict["code"] == "review_conflict"
+
+    code, asset_conflict = invoke(
+        *base,
+        "--expected-package-id",
+        review["package_id"],
+        "--expected-asset-sha256",
+        "0" * 64,
+    )
+    assert code == 3
+    assert asset_conflict["code"] == "review_conflict"
+    assert invoke("read", project)[1]["comments"][0]["status"] == "open"
+
+
+@pytest.mark.parametrize("status", ["approved", "published", "qa-pass"])
+def test_status_is_limited_to_open_or_resolved(tmp_path: Path, status: str) -> None:
+    _, project, review, created = ui_comment_fixture(tmp_path)
+    code, result = invoke(
+        "resolve",
+        project,
+        "--comment-id",
+        created["id"],
+        "--status",
+        status,
+        "--expected-package-id",
+        review["package_id"],
+        "--expected-asset-sha256",
+        created["asset"]["sha256"],
+    )
+    assert code == 2
+    assert result["code"] == "invalid_input"

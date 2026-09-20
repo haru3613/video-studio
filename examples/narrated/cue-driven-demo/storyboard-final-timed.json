@@ -1,0 +1,49 @@
+{
+  "schema": "haru.storyboard_timed.v1",
+  "project": "cue-driven-demo",
+  "visual_timeline_contract": "cue_driven.v1",
+  "timing_basis": "Authored demo cues; no speech alignment is claimed",
+  "duration_seconds": 24,
+  "scene_count": 3,
+  "scenes": [
+    {
+      "scene_id": "notice",
+      "section": "notice-the-change",
+      "start_seconds": 0,
+      "end_seconds": 6.5,
+      "start_frame": 0,
+      "end_frame": 195,
+      "duration_frames": 195,
+      "visual_events": [
+        {"event_id": "notice-change", "cue": "A signal starts as a small change.", "visual_state": "signal.change", "presenter_state": "hidden", "start_seconds": 0, "end_seconds": 3.5, "start_frame": 0, "end_frame": 105, "duration_frames": 105},
+        {"event_id": "notice-context", "cue": "Context makes it visible.", "visual_state": "signal.context", "presenter_state": "hidden", "start_seconds": 3.5, "end_seconds": 6.5, "start_frame": 105, "end_frame": 195, "duration_frames": 90}
+      ]
+    },
+    {
+      "scene_id": "filter",
+      "section": "filter-the-noise",
+      "start_seconds": 6.5,
+      "end_seconds": 15,
+      "start_frame": 195,
+      "end_frame": 450,
+      "duration_frames": 255,
+      "visual_events": [
+        {"event_id": "filter-noise", "cue": "First, remove noise.", "visual_state": "filter.noise", "presenter_state": "hidden", "start_seconds": 6.5, "end_seconds": 11, "start_frame": 195, "end_frame": 330, "duration_frames": 135},
+        {"event_id": "filter-baseline", "cue": "Then compare it with a baseline.", "visual_state": "filter.baseline", "presenter_state": "hidden", "start_seconds": 11, "end_seconds": 15, "start_frame": 330, "end_frame": 450, "duration_frames": 120}
+      ]
+    },
+    {
+      "scene_id": "decide",
+      "section": "choose-an-action",
+      "start_seconds": 15,
+      "end_seconds": 24,
+      "start_frame": 450,
+      "end_frame": 720,
+      "duration_frames": 270,
+      "visual_events": [
+        {"event_id": "decide-action", "cue": "Finally, choose one action.", "visual_state": "decision.action", "presenter_state": "hidden", "start_seconds": 15, "end_seconds": 20, "start_frame": 450, "end_frame": 600, "duration_frames": 150},
+        {"event_id": "decide-result", "cue": "A useful signal ends in a decision.", "visual_state": "decision.result", "presenter_state": "hidden", "start_seconds": 20, "end_seconds": 24, "start_frame": 600, "end_frame": 720, "duration_frames": 120}
+      ]
+    }
+  ]
+}

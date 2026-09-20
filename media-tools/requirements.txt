@@ -1,0 +1,2 @@
+# Runtime dependency for Mandarin pronunciation comparison and STT alignment.
+pypinyin==0.55.0

@@ -1,0 +1,65 @@
+.studio-overview { display:block; padding-bottom:32px; }
+.studio-overview a { color:inherit; text-decoration:none; }
+.studio-overview button { font:inherit; cursor:pointer; color:var(--fg); border:1px solid var(--border); background:transparent; border-radius:8px; padding:7px 10px; }
+.studio-overview button:hover,.studio-overview a:hover { color:#f9a8d4; }
+.studio-overview :focus-visible { outline:2px solid #f9a8d4; outline-offset:4px; }
+.studio-overview .overview-heading { display:flex; justify-content:space-between; gap:30px; align-items:center; margin:8px 0 28px; }
+.studio-overview .overview-eyebrow { color:#f9a8d4; font:11px var(--mono); letter-spacing:1.2px; margin-bottom:9px; }
+.studio-overview h1 { font-size:30px; letter-spacing:-.5px; margin-bottom:7px; }
+.studio-overview .overview-subtitle,.studio-overview .overview-count span,.studio-overview .overview-count small { color:var(--fg-dim); font-size:14px; }
+.studio-overview .overview-count { display:grid; grid-template-columns:auto auto; gap:0 10px; align-items:baseline; text-align:right; }
+.studio-overview .overview-count strong { font:38px var(--mono); }
+.studio-overview .overview-count small { grid-column:1/-1; font-size:12px; }
+.studio-overview .overview-tabs { display:flex; gap:6px; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:18px; }
+.studio-overview .overview-tabs button { display:flex; align-items:center; gap:12px; padding:10px 16px; border-color:transparent; }
+.studio-overview .overview-tabs button[aria-pressed=true] { background:var(--surface-2); border-color:rgba(236,72,153,.35); color:#f9a8d4; }
+.studio-overview .overview-tabs span { font:11px var(--mono); color:var(--fg-dim); }
+.studio-overview .overview-tabs button:last-child { margin-left:auto; }
+.studio-overview .overview-result-line { display:flex; justify-content:space-between; gap:20px; color:var(--fg-dim); font-size:12px; margin-bottom:18px; }
+.studio-overview .overview-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; min-width:0; width:280px; flex-shrink:0; align-self:flex-start; }
+.studio-overview .overview-cover { display:flex; align-items:center; justify-content:center; aspect-ratio:16/9; background:var(--surface-2); }
+.studio-overview .overview-cover img { display:block; width:100%; height:100%; object-fit:contain; }
+.studio-overview .overview-no-cover { color:var(--fg-dim); font-size:12px; }
+.studio-overview .overview-card-copy { padding:16px; }
+.studio-overview .overview-status { display:inline-block; font-size:11px; color:var(--fg-dim); margin-bottom:6px; }
+.studio-overview .overview-status.uploaded,.studio-overview .overview-status.running { color:#86efac; }
+.studio-overview .overview-status.missing { color:#fbbf24; }
+.studio-overview h3 { font-size:17px; line-height:1.5; margin:0 0 18px; font-weight:600; min-height:51px; overflow-wrap:anywhere; }
+.studio-overview .overview-card-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.studio-overview .overview-card-foot button { font-size:11px; min-height:36px; }
+.studio-overview .overview-open { font-size:12px; white-space:nowrap; padding:7px 0; }
+.studio-overview .overview-open.unavailable { color:var(--fg-dim); font-size:10px; white-space:normal; }
+.studio-overview .overview-members { border-top:1px solid var(--border); padding:4px 16px 14px; background:rgba(0,0,0,.12); }
+.studio-overview .overview-members a { display:grid; grid-template-columns:1fr auto; padding:12px 0; border-bottom:1px solid var(--border); gap:4px 10px; }
+.studio-overview .overview-members a span:first-child { font-size:13px; }
+.studio-overview .overview-members small { grid-row:2; color:var(--fg-dim); font:10px var(--mono); overflow-wrap:anywhere; }
+.studio-overview .overview-members a span:last-child { grid-column:2; grid-row:1/3; align-self:center; }
+.studio-overview .overview-members p { color:var(--fg-dim); font-size:11px; padding-top:10px; }
+.studio-overview .overview-shelf { display:grid; grid-template-columns:150px minmax(0,1fr); gap:24px; margin:0 0 36px; padding-top:10px; }
+.studio-overview .overview-shelf-heading { padding-top:6px; }
+.studio-overview .overview-shelf-heading h2 { display:block; font-size:18px; margin:0 0 8px; }
+.studio-overview .overview-shelf-heading>span { font-size:12px; color:var(--fg-dim); }
+.studio-overview .overview-shelf-controls { display:flex; gap:8px; margin-top:18px; }
+.studio-overview .overview-shelf-controls button { min-width:36px; min-height:36px; }
+.studio-overview .overview-shelf-items { display:flex; align-items:flex-start; gap:16px; overflow-x:auto; padding:4px 4px 14px; margin:-4px; overscroll-behavior-x:contain; scrollbar-color:#475569 transparent; }
+.studio-overview .overview-empty { padding:70px 20px; text-align:center; color:var(--fg-dim); }
+.studio-overview .overview-empty p+p { margin-top:8px; font-size:13px; }
+@media(max-width:620px) {
+  body:has(#overview:not(.hidden)) .header-inner {flex-wrap:wrap;gap:10px}
+  body:has(#overview:not(.hidden)) .header-inner .logo {white-space:nowrap}
+  body:has(#overview:not(.hidden)) .header-inner .filters {margin-left:0;width:100%}
+  body:has(#overview:not(.hidden)) .header-inner .search {width:100%}
+  .studio-overview .overview-heading {align-items:flex-start;gap:10px}
+  .studio-overview h1 {font-size:25px}
+  .studio-overview .overview-count {display:none}
+  .studio-overview .overview-tabs {gap:0}
+  .studio-overview .overview-tabs button {padding:8px;gap:6px;font-size:13px;min-height:44px}
+  .studio-overview .overview-result-line span:last-child {display:none}
+  .studio-overview .overview-shelf {display:block}
+  .studio-overview .overview-shelf-heading {display:flex;align-items:center;gap:12px;margin-bottom:16px}
+  .studio-overview .overview-shelf-heading h2 {margin:0}
+  .studio-overview .overview-shelf-controls {margin:0 0 0 auto}
+  .studio-overview .overview-shelf-controls button {min-width:44px;min-height:44px}
+  .studio-overview .overview-card {width:260px}
+  .studio-overview .overview-card-foot button,.studio-overview .overview-open {min-height:44px}
+}

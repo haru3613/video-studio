@@ -1,0 +1,33 @@
+# Copy this file outside the source checkout, make it owner-writable only
+# (chmod 600), and pass its absolute path to scripts/video-studio-http.
+
+[server]
+# The gateway always binds loopback. Put an HTTPS reverse proxy in front of it
+# for a private server deployment.
+host = "127.0.0.1"
+port = 8765
+resource_url = "https://studio.example.com/mcp"
+allowed_origins = ["https://studio.example.com"]
+# Add the proxy's Host value only when it differs from resource_url.
+allowed_hosts = []
+# Leaves protocol/JSON overhead around the separately enforced 1 MiB inline-text limit.
+max_request_body_size = 2097152
+session_idle_timeout_seconds = 900
+max_sessions = 100
+
+[oauth]
+issuer = "https://login.example.com/realms/video-studio"
+audience = "https://studio.example.com/mcp"
+jwks_url = "https://login.example.com/realms/video-studio/protocol/openid-connect/certs"
+algorithms = ["RS256"]
+jwks_cache_seconds = 300
+jwks_min_refresh_seconds = 10
+jwks_max_keys = 32
+jwks_max_bytes = 262144
+clock_skew_seconds = 30
+
+[paths]
+# Initialize this directory with `scripts/init-workspace`. It must contain
+# direct workspace.json, projects/, inbox/, and .video-studio/ entries.
+# Requests cannot switch workspaces.
+workspace_root = "/srv/video-studio/workspace"

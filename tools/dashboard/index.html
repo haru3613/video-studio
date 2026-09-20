@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Studio</title>
+<style>
+
+:root {
+  --bg: #0F172A;
+  --surface: #1B1730;
+  --surface-2: #201A32;
+  --fg: #F1F5F9;
+  --fg-dim: #94A3B8;
+  --primary: #EC4899;
+  --accent: #2563EB;
+  --border: rgba(255,255,255,0.08);
+  --green: #22C55E;
+  --amber: #F59E0B;
+  --red: #DC2626;
+  --gray: #64748B;
+  --sans: 'Fira Sans', system-ui, -apple-system, sans-serif;
+  --mono: 'Fira Code', ui-monospace, SFMono-Regular, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.5; }
+
+header {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(15,23,42,0.85); backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.header-inner {
+  max-width: 1200px; margin: 0 auto; padding: 14px 24px;
+  display: flex; align-items: center; gap: 16px;
+}
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: 0.2px; }
+.logo svg { color: var(--primary); }
+.logo .mono { font-family: var(--mono); font-weight: 500; font-size: 12px; color: var(--fg-dim); margin-left: 4px; }
+
+.filters { display: flex; gap: 8px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+.pill {
+  font-family: var(--mono); font-size: 13px; padding: 6px 14px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-dim); background: transparent;
+  cursor: pointer; transition: color .2s, border-color .2s, background .2s;
+}
+.pill:hover { color: var(--fg); border-color: rgba(255,255,255,0.2); }
+.pill.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.search {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg); font-family: var(--sans); font-size: 14px; padding: 7px 12px; width: 200px;
+  transition: border-color .2s;
+}
+.search:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.search::placeholder { color: var(--fg-dim); }
+
+main { max-width: 1200px; margin: 0 auto; padding: 28px 24px 80px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  overflow: hidden; cursor: pointer; display: block; color: inherit; text-decoration: none;
+  transition: transform .2s ease-out, border-color .2s, box-shadow .2s;
+}
+.card:hover, .card:focus-visible {
+  transform: translateY(-3px);
+  border-color: rgba(236,72,153,0.45);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb {
+  aspect-ratio: 16/9; position: relative; display: flex; align-items: center; justify-content: center;
+}
+.thumb svg { opacity: 0.35; color: #fff; }
+.g1 { background: linear-gradient(135deg, #3B2A5A 0%, #1E3A5F 100%); }
+.g2 { background: linear-gradient(135deg, #4A2545 0%, #2D1B4E 100%); }
+.g3 { background: linear-gradient(135deg, #1E3A3A 0%, #2A2550 100%); }
+.g4 { background: linear-gradient(135deg, #45303A 0%, #1E2A4A 100%); }
+.g5 { background: linear-gradient(135deg, #2E3A28 0%, #1F2E48 100%); }
+.g6 { background: linear-gradient(135deg, #3A2E20 0%, #302048 100%); }
+.thumb .mock-note {
+  position: absolute; bottom: 8px; right: 10px; font-family: var(--mono); font-size: 10px;
+  color: rgba(255,255,255,0.4); letter-spacing: 0.5px;
+}
+.card-body { padding: 14px 16px 16px; }
+.card-title { font-weight: 600; font-size: 15px; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badges { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.badge {
+  font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-dim);
+}
+.badge.studio { color: #C4B5FD; border-color: rgba(196,181,253,0.3); }
+.badge.media { color: #7DD3FC; border-color: rgba(125,211,252,0.3); }
+.chip {
+  font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.chip.pass { color: var(--green); background: rgba(34,197,94,0.12); }
+.chip.parked { color: var(--amber); background: rgba(245,158,11,0.12); }
+.chip.missing { color: var(--gray); background: rgba(100,116,139,0.15); }
+.chip.harvey { color: var(--primary); background: rgba(236,72,153,0.12); }
+.chip.none { color: var(--gray); background: rgba(100,116,139,0.15); }
+.prog { margin-bottom: 10px; }
+.prog-bar { height: 4px; border-radius: 2px; background: rgba(100,116,139,0.22); overflow: hidden; }
+.prog-bar > i { display: block; height: 100%; background: var(--green); border-radius: 2px; }
+.prog-txt { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+.live { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px; vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .live { animation: none; } }
+.counts { display: flex; gap: 14px; font-family: var(--mono); font-size: 12px; color: var(--fg-dim); }
+.counts span { display: inline-flex; align-items: center; gap: 5px; }
+.counts svg { width: 13px; height: 13px; }
+.updated { margin-top: 10px; font-size: 12px; color: var(--fg-dim); }
+
+/* ---------- detail view ---------- */
+.back {
+  display: inline-flex; align-items: center; gap: 6px; color: var(--accent);
+  text-decoration: none; font-size: 14px; margin-bottom: 18px; cursor: pointer;
+  background: none; border: none; font-family: var(--sans);
+}
+.back:hover { text-decoration: underline; }
+.detail-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+.detail-head h1 { font-size: 24px; font-weight: 700; }
+.detail-sub { color: var(--fg-dim); font-size: 14px; margin-bottom: 24px; }
+
+.pipeline {
+  display: flex; gap: 8px; flex-wrap: wrap; padding: 18px; margin-bottom: 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+}
+.stage { display: flex; align-items: center; gap: 8px; }
+.stage-chip {
+  font-family: var(--mono); font-size: 12px; padding: 6px 12px; border-radius: 8px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 86px;
+  border: 1px solid var(--border);
+}
+.stage-chip .s-name { color: var(--fg); font-weight: 500; }
+.stage-chip .s-status { font-size: 10px; }
+.stage-chip.pass { border-color: rgba(34,197,94,0.35); } .stage-chip.pass .s-status { color: var(--green); }
+.stage-chip.parked { border-color: rgba(245,158,11,0.35); } .stage-chip.parked .s-status { color: var(--amber); }
+.stage-chip.missing { opacity: 0.55; } .stage-chip.missing .s-status { color: var(--gray); }
+.stage-chip.harvey { border-color: rgba(236,72,153,0.4); } .stage-chip.harvey .s-status { color: var(--primary); }
+.stage-arrow { color: var(--gray); flex-shrink: 0; }
+
+.callout {
+  border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; font-size: 14px;
+  border: 1px solid; display: flex; gap: 10px; align-items: flex-start;
+}
+.callout svg { flex-shrink: 0; margin-top: 2px; }
+.callout.blocker { border-color: rgba(220,38,38,0.35); background: rgba(220,38,38,0.08); color: #FCA5A5; }
+.callout.next { border-color: rgba(37,99,235,0.35); background: rgba(37,99,235,0.08); color: #93C5FD; }
+.callout ul { margin-left: 18px; }
+
+section { margin-top: 34px; }
+section h2 {
+  font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px;
+  margin-bottom: 14px; color: var(--fg);
+}
+section h2 svg { color: var(--fg-dim); }
+section h2 .count { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); font-weight: 400; }
+
+.empty {
+  border: 1px dashed var(--border); border-radius: 12px; padding: 28px; text-align: center;
+  color: var(--fg-dim); font-size: 14px;
+}
+
+.img-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.img-tile {
+  aspect-ratio: 1; border-radius: 10px; border: 1px solid var(--border);
+  display: flex; align-items: flex-end; padding: 8px; cursor: pointer;
+  transition: transform .2s ease-out, border-color .2s; position: relative; overflow: hidden;
+}
+.img-tile:hover { transform: scale(1.03); border-color: rgba(37,99,235,0.5); }
+.img-tile .fname {
+  font-family: var(--mono); font-size: 10px; color: rgba(255,255,255,0.75);
+  background: rgba(0,0,0,0.45); padding: 2px 6px; border-radius: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+
+.file-list { display: flex; flex-direction: column; gap: 6px; }
+.file-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  cursor: pointer; transition: border-color .2s, background .2s;
+}
+.file-row:hover { border-color: rgba(37,99,235,0.5); background: var(--surface-2); }
+.file-row svg { color: var(--fg-dim); flex-shrink: 0; }
+.file-row .fname { font-family: var(--mono); font-size: 13px; color: var(--fg); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row .fsize { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); }
+
+.doc-open {
+  margin-top: 10px; background: var(--surface); border: 1px solid rgba(37,99,235,0.4);
+  border-radius: 12px; padding: 20px 24px;
+}
+.doc-open .doc-title { font-family: var(--mono); font-size: 12px; color: var(--accent); margin-bottom: 12px; }
+.doc-open p { font-size: 14px; color: var(--fg); margin-bottom: 10px; }
+.doc-open p.dim { color: var(--fg-dim); }
+
+.video-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-width: 640px; }
+.video-ph {
+  aspect-ratio: 16/9; background: linear-gradient(135deg, #16213E 0%, #0F172A 100%);
+  display: flex; align-items: center; justify-content: center; position: relative;
+}
+.play-btn {
+  width: 60px; height: 60px; border-radius: 50%; background: rgba(236,72,153,0.9);
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: transform .2s;
+}
+.play-btn:hover { transform: scale(1.08); }
+.video-meta { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+.video-meta .fname { font-family: var(--mono); font-size: 13px; }
+.video-meta .fsize { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); }
+
+.hidden { display: none; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.chip.red { color: #FCA5A5; background: rgba(220,38,38,0.15); }
+.stage-chip.none { opacity: 0.55; }
+.stage-chip.none .s-status { color: var(--gray); }
+.stage-chip.red { border-color: rgba(220,38,38,0.4); }
+.stage-chip.red .s-status { color: #FCA5A5; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.img-tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.img-tile .fname { position: relative; z-index: 1; }
+.banner {
+  border: 1px solid rgba(245,158,11,0.4); background: rgba(245,158,11,0.08); color: #FCD34D;
+  border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; font-size: 14px;
+}
+.lightbox {
+  position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.85);
+  display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+}
+.lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 8px; }
+/* .lightbox is declared after .hidden, so its display:flex would win the
+   equal-specificity tie and leave an invisible full-screen overlay eating
+   every click; this higher-specificity rule restores hidden. */
+.lightbox.hidden { display: none; }
+video { width: 100%; display: block; background: #000; }
+.doc-open pre { font-family: var(--mono); font-size: 13px; white-space: pre-wrap; color: var(--fg); }
+.doc-open h3, .doc-open h4, .doc-open h5 { margin: 12px 0 6px; }
+.doc-open ul { margin: 6px 0 6px 20px; font-size: 14px; }
+.truncate-note { font-family: var(--mono); font-size: 12px; color: var(--amber); margin-top: 8px; }
+</style>
+<link rel="stylesheet" href="/review/review.css">
+<link rel="stylesheet" href="/overview/overview.css">
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>
+      Video Studio <span class="mono" id="server-address"></span>
+    </div>
+    <div class="filters">
+      <button class="pill active" data-filter="all">全部</button>
+      <button class="pill" data-filter="running">製作中</button>
+      <button class="pill" data-filter="unfinished">未完成</button>
+      <button class="pill" data-filter="awaiting">待上傳</button>
+      <button class="pill" data-filter="uploaded">已上傳</button>
+      <button class="pill" data-filter="studio">studio</button>
+      <button class="pill" data-filter="media">media</button>
+      <input class="search" id="search" placeholder="搜尋專案…" aria-label="搜尋專案">
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner hidden"></div>
+  <div id="overview"><div class="grid" id="grid"></div><div id="no-results" class="empty hidden">找不到符合的專案</div></div>
+  <div id="detail" class="hidden"></div>
+</main>
+<div id="lightbox" class="lightbox hidden" onclick="closeLightbox()"><img id="lightbox-img" alt=""></div>
+
+<script src="/review/review.js"></script>
+<script src="/overview/overview.js"></script>
+<script>
+const state = { overview: null, filter: 'all', q: '', scrollY: 0 };
+const $ = s => document.querySelector(s);
+
+const ICONS = {
+  video: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>',
+  image: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>',
+  doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg>',
+  audio: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+  back: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>',
+  warn: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+  next: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>',
+  arrow: '<svg class="stage-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>',
+};
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const mediaUrl = (source, project, path) =>
+  `/media/${source}/${encodeURIComponent(project)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+
+function fmtSize(b) {
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b / 1e3).toFixed(1) + ' KB';
+  return b + ' B';
+}
+
+function relTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const days = Math.floor((Date.now() - d) / 86400000);
+  const hm = d.toTimeString().slice(0, 5);
+  if (days <= 0) return `今天 ${hm} 更新`;
+  if (days === 1) return `昨天 ${hm} 更新`;
+  return `${d.getMonth() + 1}/${d.getDate()} 更新`;
+}
+
+function statusMeta(s) {
+  if (!s) return { cls: 'none', label: '無狀態資料' };
+  const cls = /requires_operator_approval|approval/.test(s) ? 'harvey'
+    : /fail|block|error/.test(s) ? 'red'
+    : /parked|draft|await|hold/.test(s) ? 'parked'
+    : /pass|ready|ship|done|complete/.test(s) ? 'pass' : 'none';
+  return { cls, label: s };
+}
+const chip = s => { const m = statusMeta(s); return `<span class="chip ${m.cls}">${esc(m.label)}</span>`; };
+
+const UPLOAD_META = {
+  uploaded: { cls: 'pass', label: '已上傳' },
+  awaiting_approval: { cls: 'harvey', label: '待上傳' },
+  not_ready: { cls: 'none', label: '未完成' },
+};
+function uploadChip(u) {
+  if (!u) return '';
+  if (u.state === 'not_ready') return '';  // true of almost every card; the status chip already says it
+  const m = UPLOAD_META[u.state] || UPLOAD_META.not_ready;
+  const vis = u.state === 'uploaded' && u.visibility ? ` · ${esc(u.visibility)}` : '';
+  return `<span class="chip ${m.cls}">${m.label}${vis}</span>`;
+}
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+/* ---------- overview ---------- */
+const FILTERS = {
+  all: () => true,
+  running: p => !!(p.lease && p.lease.active),
+  unfinished: p => !!p.upload && p.upload.state === 'not_ready',
+  awaiting: p => !!p.upload && p.upload.state === 'awaiting_approval',
+  uploaded: p => !!p.upload && p.upload.state === 'uploaded',
+  studio: p => p.source === 'studio',
+  media: p => p.source === 'media',
+};
+
+function renderOverview() {
+  if (!state.overview) return;
+  HaruOverview.render($('#grid'), state.overview, {
+    query: state.q, filter: state.filter,
+    match: FILTERS[state.filter] || FILTERS.all,
+  });
+  $('#no-results').classList.add('hidden');
+}
+
+/* ---------- detail ---------- */
+function pipelineStrip(stages) {
+  const entries = Object.entries(stages);
+  return `<div class="pipeline" aria-label="pipeline stages">` + entries.map(([name, st], i) => {
+    const m = statusMeta(st.status);
+    return `<div class="stage"><div class="stage-chip ${m.cls}">
+      <span class="s-name">${esc(name)}</span><span class="s-status">${esc(st.status)}</span>
+    </div>${i < entries.length - 1 ? ICONS.arrow : ''}</div>`;
+  }).join('') + `</div>`;
+}
+
+const callout = (cls, icon, title, items) =>
+  `<div class="callout ${cls}">${icon}<div><strong>${title}：</strong><ul>${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div></div>`;
+
+function section(title, icon, countText, bodyHtml) {
+  return `<section><h2>${icon} ${title} <span class="count">${countText}</span></h2>${bodyHtml}</section>`;
+}
+
+function renderMarkdown(src) {
+  const lines = esc(src).split('\n');
+  let html = '', list = false, para = [];
+  const inline = s => s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  const flushP = () => { if (para.length) { html += `<p>${para.map(inline).join('<br>')}</p>`; para = []; } };
+  const closeL = () => { if (list) { html += '</ul>'; list = false; } };
+  for (const line of lines) {
+    const h = line.match(/^(#{1,3}) +(.*)/), li = line.match(/^[-*] +(.*)/);
+    if (h) { flushP(); closeL(); html += `<h${h[1].length + 2}>${inline(h[2])}</h${h[1].length + 2}>`; }
+    else if (li) { flushP(); if (!list) { html += '<ul>'; list = true; } html += `<li>${inline(li[1])}</li>`; }
+    else if (!line.trim()) { flushP(); closeL(); }
+    else para.push(line);
+  }
+  flushP(); closeL();
+  return html;
+}
+
+async function toggleDoc(el, source, project, path) {
+  const open = el.nextElementSibling;
+  if (open && open.classList.contains('doc-open')) { open.remove(); return; }
+  const r = await fetch(mediaUrl(source, project, path));
+  if (!r.ok) {
+    el.insertAdjacentHTML('afterend',
+      `<div class="doc-open"><div class="doc-title">${esc(path)}</div><pre>載入失敗（HTTP ${r.status}）</pre></div>`);
+    return;
+  }
+  const text = await r.text();
+  let body;
+  if (path.endsWith('.md')) body = renderMarkdown(text);
+  else if (path.endsWith('.json')) { try { body = `<pre>${esc(JSON.stringify(JSON.parse(text), null, 2))}</pre>`; } catch { body = `<pre>${esc(text)}</pre>`; } }
+  else body = `<pre>${esc(text)}</pre>`;
+  el.insertAdjacentHTML('afterend',
+    `<div class="doc-open"><div class="doc-title">${esc(path)}</div>${body}</div>`);
+}
+
+function openLightbox(url) { $('#lightbox-img').src = url; $('#lightbox').classList.remove('hidden'); }
+function closeLightbox() { $('#lightbox').classList.add('hidden'); $('#lightbox-img').src = ''; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+let detailRequest = 0;
+async function renderDetail(source, name, filesOnly = false) {
+  const request = ++detailRequest;
+  const el = $('#detail');
+  el.innerHTML = '<div class="empty">載入中…</div>';
+  let d;
+  try { d = await fetchJSON(`/api/projects/${source}/${encodeURIComponent(name)}`); }
+  catch { if (request === detailRequest) el.innerHTML = '<div class="empty">載入失敗 — 專案不存在或 server 未啟動</div>'; return; }
+  if (request !== detailRequest) return;
+  if (!filesOnly && window.HaruReview) {
+    const mounted = await HaruReview.mount(el, source, name, {
+      showFiles: () => { HaruReview.unmount(); renderDetail(source, name, true); }
+    });
+    if (request !== detailRequest || mounted) return;
+  }
+  const p = d.pipeline;
+  let html = `<button class="back" onclick="history.length > 1 ? history.back() : location.hash = ''">${ICONS.back} 回到總覽</button>
+    <div class="detail-head"><h1>${esc(d.name)}</h1><span class="badge ${d.source}">${d.source}</span>${chip(p && p.overall_status)}</div>`;
+  if (p && p.generated_at) html += `<div class="detail-sub">updated_by ${esc(p.updated_by || '?')} · ${relTime(p.generated_at)}</div>`;
+  if (p && p.stages) html += pipelineStrip(p.stages);
+  if (p && p.blockers && p.blockers.length) html += callout('blocker', ICONS.warn, 'Blocker', p.blockers);
+  if (p && p.warnings && p.warnings.length) html += callout('blocker', ICONS.warn, 'Warnings', p.warnings);
+  if (p && p.next_actions && p.next_actions.length) html += callout('next', ICONS.next, 'Next actions', p.next_actions);
+
+  const f = d.files;
+
+  // The script is what the reviewer opens the page for; don't make him hunt for it
+  // in the flat doc list. Canonical names come from tools/canonical_layout.py.
+  // Priority order = what the reviewer wants to read first. The full narration under
+  // script/ beats script-proposal.md, which is only a title+premise stub.
+  const SCRIPT_PATTERNS = [
+    /^script\/narration-draft.*\.txt$/, /^narration-clean\.txt$/, /^script\/.*\.(txt|md)$/,
+    /^script-proposal\.md$/, /^dialogue_script\.json$/, /^narration-final\.srt$/,
+    /^issue_brief\.md$/, /^sources\.md$/,
+  ];
+  const scripts = [];
+  for (const re of SCRIPT_PATTERNS) {
+    for (const doc of f.docs.filter(x => re.test(x.path)).sort((a, b) => b.mtime - a.mtime)) {
+      if (!scripts.some(s => s.path === doc.path)) scripts.push(doc);
+    }
+  }
+  // Narration audio belongs next to the script, not buried in the file list.
+  const narration = f.audio.find(a => a.path === 'narration-final.mp3')
+    || f.audio.filter(a => /narration/.test(a.path)).sort((a, b) => b.mtime - a.mtime)[0];
+  if (scripts.length || narration) {
+    const player = narration ? `<div class="file-row">${ICONS.audio}<span class="fname">${esc(narration.path)}</span>
+        <audio controls preload="none" src="${mediaUrl(source, name, narration.path)}" style="height:32px;"></audio>
+        <span class="fsize">${fmtSize(narration.size)}</span></div>` : '';
+    html += section('本集腳本', ICONS.doc, scripts.length ? `${esc(scripts[0].path)} 自動展開` : '只有音檔',
+      `<div class="file-list">` + player + scripts.map((doc, i) => `<div class="file-row script-row" data-source="${esc(source)}" data-project="${esc(name)}" data-path="${esc(doc.path)}" data-auto="${i === 0 ? '1' : ''}">
+          ${ICONS.doc}<span class="fname">${esc(doc.path)}</span><span class="fsize">${fmtSize(doc.size)}</span>
+        </div>`).join('') + `</div>`);
+  }
+
+  html += section('影片', ICONS.video, `${f.videos.length} 個`,
+    f.videos.length === 0 ? '<div class="empty">還沒有產出影片</div>'
+      : f.videos.map(v => `<div class="video-box" style="margin-bottom:16px;">
+          <video controls preload="metadata" src="${mediaUrl(source, name, v.path)}"></video>
+          <div class="video-meta"><span class="fname">${esc(v.path)}</span><span class="fsize">${fmtSize(v.size)}</span></div>
+        </div>`).join(''));
+
+  html += section('圖片', ICONS.image, `${f.images.length} 張 · 點擊看大圖`,
+    f.images.length === 0 ? '<div class="empty">沒有圖片</div>'
+      : `<div class="img-grid">` + f.images.map(im => `<div class="img-tile" data-url="${esc(mediaUrl(source, name, im.path))}">
+          <img src="${mediaUrl(source, name, im.path)}" loading="lazy" alt="${esc(im.path)}">
+          <span class="fname">${esc(im.path.split('/').pop())}</span>
+        </div>`).join('') + `</div>`);
+
+  const docsAudio = f.docs.concat(f.audio);
+  html += section('腳本 / 文件', ICONS.doc, `${docsAudio.length} 個 · 點擊直接閱讀`,
+    docsAudio.length === 0 ? '<div class="empty">沒有文件</div>'
+      : `<div class="file-list">` + f.docs.map(doc => `<div class="file-row" data-source="${esc(source)}" data-project="${esc(name)}" data-path="${esc(doc.path)}">
+          ${ICONS.doc}<span class="fname">${esc(doc.path)}</span><span class="fsize">${fmtSize(doc.size)}</span>
+        </div>`).join('')
+      + f.audio.map(a => `<div class="file-row">${ICONS.audio}<span class="fname">${esc(a.path)}</span>
+          <audio controls preload="none" src="${mediaUrl(source, name, a.path)}" style="height:32px;"></audio>
+          <span class="fsize">${fmtSize(a.size)}</span></div>`).join('') + `</div>`);
+
+  if (d.truncated) html += `<div class="truncate-note">部分清單已截斷（每類最多顯示 500 個檔案）</div>`;
+  el.innerHTML = html;
+  if (filesOnly && window.HaruReview) {
+    const reviewBack = document.createElement('button');
+    reviewBack.className = 'back';
+    reviewBack.textContent = '← 回到審片';
+    reviewBack.addEventListener('click', () => renderDetail(source, name));
+    el.prepend(reviewBack);
+  }
+  el.querySelectorAll('.img-tile[data-url]').forEach(t =>
+    t.addEventListener('click', () => openLightbox(t.dataset.url)));
+  el.querySelectorAll('.file-row[data-path]').forEach(r =>
+    r.addEventListener('click', () => toggleDoc(r, r.dataset.source, r.dataset.project, r.dataset.path)));
+  const auto = el.querySelector('.script-row[data-auto="1"]');
+  if (auto) toggleDoc(auto, auto.dataset.source, auto.dataset.project, auto.dataset.path).catch(() => {});
+}
+
+/* ---------- routing ---------- */
+function route() {
+  ++detailRequest;
+  window.HaruReview?.unmount();
+  const m = location.hash.match(/^#\/project\/(studio|media)\/(.+)$/);
+  if (m) {
+    state.scrollY = $('#detail').classList.contains('hidden') ? window.scrollY : state.scrollY;
+    $('#overview').classList.add('hidden');
+    $('#detail').classList.remove('hidden');
+    window.scrollTo(0, 0);
+    renderDetail(m[1], decodeURIComponent(m[2]));
+  } else {
+    $('#detail').classList.add('hidden');
+    $('#overview').classList.remove('hidden');
+    window.scrollTo(0, state.scrollY);
+  }
+}
+window.addEventListener('hashchange', route);
+
+/* ---------- init ---------- */
+document.querySelectorAll('.pill').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.pill').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.filter = b.dataset.filter;
+  renderOverview();
+}));
+$('#search').addEventListener('input', e => { state.q = e.target.value; renderOverview(); });
+
+async function refresh(first) {
+  try {
+    const data = await fetchJSON('/api/overview');
+    state.overview = data;
+    const b = $('#banner');
+    if (data.warnings.length) b.innerHTML = data.warnings.map(esc).join('<br>');
+    b.classList.toggle('hidden', !data.warnings.length);
+    renderOverview();
+  } catch (e) {
+    if (first) $('#grid').innerHTML = `<div class="empty">無法載入專案清單：${esc(e.message)}</div>`;
+    // ponytail: a failed poll keeps the last good render; the next tick retries.
+  }
+}
+
+(async function init() {
+  document.querySelector("#server-address").textContent = location.host;
+  await refresh(true);
+  route();
+  // ponytail: 10s full re-poll. Cheap enough at this project count; switch to
+  // SSE only if the stat scan ever shows up in the logs as slow.
+  setInterval(() => { if (!document.hidden && $('#detail').classList.contains('hidden')) refresh(false); }, 10000);
+})();
+</script>
+</body>
+</html>

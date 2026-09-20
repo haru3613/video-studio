@@ -1,0 +1,22 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  PYTHON="$ROOT/.venv/bin/python"
+elif [ -x /opt/homebrew/bin/python3.13 ]; then
+  PYTHON=/opt/homebrew/bin/python3.13
+elif [ -x /opt/homebrew/bin/python3.12 ]; then
+  PYTHON=/opt/homebrew/bin/python3.12
+elif [ -x /opt/homebrew/bin/python3.11 ]; then
+  PYTHON=/opt/homebrew/bin/python3.11
+else
+  PYTHON=/usr/bin/python3
+fi
+
+exec "$PYTHON" -I -S "$ROOT/tools/local_delivery.py" "$@"

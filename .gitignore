@@ -19,11 +19,26 @@ dist/
 # Private runtime state and generated media
 .hvp/
 .state/
+.pytest_cache/
+.ruff_cache/
+.build/
+*.egg-info/
+*.local.toml
+provider-budget.json
+pipeline_status.json
+artifact_manifest.json
 output/
 outputs/
 renders/
 tmp/
 *.log
+*.mp4
+*.mov
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.flac
 browser-profile/
 chrome-profile/
 

@@ -1,0 +1,23 @@
+#!/bin/sh -p
+set -eu
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+case "${1:-}" in
+  create|restore) ;;
+  *)
+    printf '%s\n' '{"schema_version":1,"outcome":"error","code":"invalid_input","data":null}'
+    exit 2
+    ;;
+esac
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  PYTHON="$ROOT/.venv/bin/python"
+else
+  PYTHON=/usr/bin/python3
+fi
+exec "$PYTHON" -I -S "$ROOT/tools/workspace_backup.py" "$@"

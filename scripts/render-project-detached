@@ -1,0 +1,9 @@
+#!/bin/sh -p
+set +e
+
+label=$1
+shift
+/usr/bin/python3 -I "$@"
+status=$?
+/bin/launchctl bootout "gui/$(/usr/bin/id -u)/$label" >/dev/null 2>&1
+exit "$status"

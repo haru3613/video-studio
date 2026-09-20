@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source_repository": "git@github.com:haru3613/haru-media-tools.git",
+  "source_commit": "6bd0414736dbb63a6dad8ec55b86116317d50119",
+  "authorization": "Repository owner authorized reuse for the video-studio open-source extraction.",
+  "source_license_observation": "No LICENSE file was present at the source commit; repository-level licensing must be resolved before public release.",
+  "files": [
+    {"source": "video/render_and_verify.sh", "target": "video/render_and_verify.sh", "disposition": "portable rewrite preserving render and FFmpeg verification contract"},
+    {"source": "narration/generate_sectioned_narration.py", "target": "narration/generate_sectioned_narration.py", "disposition": "ported; private configuration is supplied by the operator"},
+    {"source": "narration/generate_narration_with_srt.py", "target": "narration/generate_narration_with_srt.py", "disposition": "portable rewrite preserving cache, alignment and take receipt contracts"},
+    {"source": "narration/stt_align.py", "target": "narration/stt_align.py", "disposition": "ported pure retiming and optional transcription adapter"},
+    {"source": "narration/verify_pronunciation.py", "target": "narration/verify_pronunciation.py", "disposition": "ported with private accepted substitutions and credential defaults removed"},
+    {"source": "narration/g2p_plan.py", "target": "narration/g2p_plan.py", "disposition": "ported with neutral environment configuration and external models"},
+    {"source": "narration/confirm_pronunciation.py", "target": "narration/confirm_pronunciation.py", "disposition": "ported; paid work remains explicit and user configured"},
+    {"source": "narration/zh_normalize.py", "target": "narration/zh_normalize.py", "disposition": "ported pure text normalization"},
+    {"source": "narration/providers/base.py", "target": "narration/providers/base.py", "disposition": "ported provider protocol"},
+    {"source": "narration/providers/__init__.py", "target": "narration/providers/__init__.py", "disposition": "bounded to the included ElevenLabs adapter"},
+    {"source": "narration/providers/elevenlabs.py", "target": "narration/providers/elevenlabs.py", "disposition": "ported with explicit environment or key-file configuration"},
+    {"source": "cover/make_cover.py", "target": "cover/make_cover.py", "disposition": "neutral rewrite with user assets and portable browser discovery"},
+    {"source": "cover/cover_template.html", "target": "cover/cover_template.html", "disposition": "neutralized template; no identity asset included"}
+  ],
+  "excluded": [
+    "voice identities and voice-specific pronunciation rule data",
+    "credentials and account paths",
+    "provider responses and billing ledgers",
+    "generated media and identity assets",
+    "G2P and language-model weights"
+  ]
+}

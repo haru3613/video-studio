@@ -1,0 +1,44 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.97"
+
+[[bin]]
+name = "hvp-state"
+path = "src/bin/hvp_state.rs"
+
+[[bin]]
+name = "hvp-mcp"
+path = "src/bin/hvp_mcp.rs"
+
+[[bin]]
+name = "hvp-runtime"
+path = "src/bin/hvp_runtime.rs"
+
+[[bin]]
+name = "video-studio"
+path = "src/bin/video_studio.rs"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive", "env"] }
+fs2 = "0.4.3"
+libc = "0.2.180"
+rmcp = { version = "2.2.0", default-features = false, features = ["client", "macros", "server", "transport-child-process", "transport-io"] }
+schemars = "1.1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tokio = { version = "1.48.0", features = ["io-std", "macros", "process", "rt-multi-thread", "time"] }
+uuid = { version = "1.21.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.25.0"
+tokio = { version = "1.48.0", features = ["process", "time"] }
+
+[build-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"

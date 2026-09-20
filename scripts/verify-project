@@ -1,0 +1,14 @@
+#!/bin/sh -p
+set -eu
+
+if [ "$#" -lt 1 ]; then
+  printf '%s\n' "usage: scripts/verify-project <project-slug-or-path> [--write]" >&2
+  exit 2
+fi
+
+case "$0" in
+  */*) SCRIPT_DIR=${0%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+/usr/bin/python3 -I -S "$ROOT/tools/agent_status.py" "$@" --check
