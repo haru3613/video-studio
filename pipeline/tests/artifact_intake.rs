@@ -161,6 +161,49 @@ fn staged_inbox_can_import_and_produce_only_allowlisted_agent_artifacts() {
 }
 
 #[test]
+fn staged_project_spec_can_be_replaced_for_a_new_prepare_attempt() {
+    let (_directory, _workspace, project, lease, _capability) = fixture();
+    let repo = repo_root();
+    let mut executor = ProcessExecutor;
+    for (key, title) in [("one", "First"), ("two", "Second")] {
+        let staged = application::artifact_stage(
+            &ArtifactStageRequest {
+                project_root: project.clone(),
+                lease: lease.clone(),
+                role: "metadata".to_owned(),
+                inbox_path: None,
+                inline_text: Some(format!(
+                    r#"{{"schema":"video_studio.project_spec.v1","title":"{title}"}}"#
+                )),
+            },
+            &repo,
+            &mut executor,
+        );
+        assert_eq!(staged.code, "artifact_staged", "{key}");
+        let result = application::produce_staged_artifact(
+            &ProduceStagedArtifactRequest {
+                project_root: project.clone(),
+                lease: lease.clone(),
+                stage_id: staged.data.unwrap()["stage_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                artifact: "project-spec.json".to_owned(),
+                produced_by: "video-studio prepare".to_owned(),
+            },
+            &repo,
+            &mut executor,
+        );
+        assert_eq!(result.code, "artifact_produced", "{key}");
+    }
+    assert!(
+        fs::read_to_string(project.join("project-spec.json"))
+            .unwrap()
+            .contains("Second")
+    );
+}
+
+#[test]
 fn staging_requires_exactly_one_bounded_source_and_valid_stage_ids() {
     let (_directory, _workspace, project, lease, _capability) = fixture();
     let repo = repo_root();

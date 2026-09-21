@@ -3089,6 +3089,10 @@ pub fn produce_artifact(
         OsString::from("--produced-by"),
         request.produced_by.clone().into(),
     ];
+    let mut arguments = arguments.to_vec();
+    if request.artifact == "project-spec.json" {
+        arguments.push(OsString::from("--force"));
+    }
     let token = &request.lease.capability;
     let mut executor_failed = false;
     let execution = ProjectStore::new(&project).with_verified_lease_identity_at(

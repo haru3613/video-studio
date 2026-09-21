@@ -338,7 +338,6 @@ GENERATED_NEVER_SCAFFOLD = (
     "publish/publish-approval.json",
     "artifact_manifest.json",
     RENDER_SELF_EVAL_RESULT,
-    "project-spec.json",
 )
 
 
@@ -657,7 +656,7 @@ def scaffold(project: Path, *, force: bool = False) -> list:
             and active_profile not in artifact.profiles
         ):
             continue
-        if artifact.path in GENERATED_NEVER_SCAFFOLD:
+        if artifact.path in GENERATED_NEVER_SCAFFOLD or artifact.path == "project-spec.json":
             continue
         target = project / artifact.path
         if (

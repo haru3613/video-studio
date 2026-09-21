@@ -667,7 +667,8 @@ def prepare(project_value, owner):
     )
     contract = direct(project, "project-contract.json")
     try:
-        value = json.loads(contract.read_text())
+        contract_raw = contract.read_bytes()
+        value = json.loads(contract_raw)
     except (OSError, ValueError) as error:
         raise PrepareError(
             "project_invalid", "project contract is unavailable"
@@ -678,7 +679,8 @@ def prepare(project_value, owner):
         "project needs a runtime contract",
     )
     require(
-        value.get("lane_contract") in (None, "manual.v1"),
+        value.get("lane_contract") in (None, "HVP_TODO_REPLACE_ME", "manual.v1")
+        and value.get("production_profile") in (None, "HVP_TODO_REPLACE_ME"),
         "project_profile_incompatible",
         "preparation supports the manual local-delivery profile",
     )
@@ -716,6 +718,15 @@ def prepare(project_value, owner):
                     "existing custom or older template code is preserved; use a fresh project or migrate it explicitly",
                 )
             files, media, duration_ms = materialize(project, owner, spec, spec_digest)
+            if (
+                value.get("lane_contract") != "manual.v1"
+                or value.get("production_profile") is not None
+            ):
+                # `create` scaffolds an unselected contract. Importing a narrated
+                # spec explicitly selects local manual delivery, never a presenter
+                # profile or editorial/publication approval.
+                value.update(lane_contract="manual.v1", production_profile=None)
+                files["project-contract.json"] = json_bytes(value)
             for relative in [*files, *media]:
                 destination = direct(project, relative)
                 require(
@@ -761,6 +772,11 @@ def prepare(project_value, owner):
                     spec_path.read_bytes() == raw,
                     "spec_changed",
                     "project spec changed while preparing",
+                )
+                require(
+                    contract.read_bytes() == contract_raw,
+                    "project_changed",
+                    "project contract changed while preparing",
                 )
                 try:
                     if fresh:

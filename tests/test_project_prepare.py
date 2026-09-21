@@ -298,3 +298,24 @@ def test_short_video_is_rejected_before_project_materialization(prepared_project
     with pytest.raises(project_prepare.PrepareError, match="shorter than its scene"):
         project_prepare.prepare(project, "owner")
     assert not (project / "remotion").exists()
+
+
+def test_prepare_initializes_scaffolded_manual_lane_and_preserves_runtime(prepared_project):
+    workspace, project = prepared_project
+    contract_path = project / "project-contract.json"
+    contract = json.loads(contract_path.read_text())
+    contract.update(lane_contract="HVP_TODO_REPLACE_ME", production_profile="HVP_TODO_REPLACE_ME")
+    contract_path.write_text(json.dumps(contract))
+    audio = write_audio(workspace / "inbox/source.wav")
+    voice, subs = stage_inputs(workspace, project, "owner", audio=audio, captions=srt())
+    write_spec(project, spec(voice, subs))
+    project_prepare.prepare(project, "owner")
+    updated = json.loads(contract_path.read_text())
+    assert updated["lane_contract"] == "manual.v1"
+    assert updated["production_profile"] is None
+    assert updated["runtime_contract"] == contract["runtime_contract"]
+    updated.update(lane_contract="tech_longform.v1", production_profile="technical_host.v1")
+    contract_path.write_text(json.dumps(updated))
+    with pytest.raises(project_prepare.PrepareError, match="manual local-delivery"):
+        project_prepare.prepare(project, "owner")
+    assert json.loads(contract_path.read_text()) == updated
