@@ -319,3 +319,29 @@ def test_prepare_initializes_scaffolded_manual_lane_and_preserves_runtime(prepar
     with pytest.raises(project_prepare.PrepareError, match="manual local-delivery"):
         project_prepare.prepare(project, "owner")
     assert json.loads(contract_path.read_text()) == updated
+
+
+def test_prepare_materializes_writable_files_from_an_immutable_installed_template(prepared_project, tmp_path, monkeypatch):
+    workspace, project = prepared_project
+    release = tmp_path / "release"
+    bundle = release / "templates/narrated/remotion"
+    shutil.copytree(project_prepare.ROOT / "templates/narrated/remotion", bundle,
+                    ignore=shutil.ignore_patterns("node_modules", "output", ".cache"))
+    for path in bundle.rglob("*"):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    bundle.chmod(0o555)
+    monkeypatch.setattr(project_prepare, "ROOT", release)
+    audio = write_audio(workspace / "inbox/source.wav")
+    voice, subs = stage_inputs(workspace, project, "owner", audio=audio, captions=srt())
+    write_spec(project, spec(voice, subs))
+    try:
+        project_prepare.prepare(project, "owner")
+        content = project / "remotion/src/content.json"
+        assert json.loads(content.read_text())["media"]["narration"]["kind"] == "user_supplied_narration"
+        assert os.access(content, os.W_OK)
+        assert os.access(content.parent, os.W_OK)
+        assert (bundle / "src/content.json").stat().st_mode & 0o222 == 0
+    finally:
+        bundle.chmod(0o755)
+        for path in bundle.rglob("*"):
+            path.chmod(0o755 if path.is_dir() else 0o644)

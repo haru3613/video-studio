@@ -754,7 +754,15 @@ def prepare(project_value, owner):
                         ignore=shutil.ignore_patterns(
                             "node_modules", "output", ".cache"
                         ),
+                        copy_function=shutil.copyfile,
                     )
+                    # The release is read-only; the project's copy must be editable.
+                    for directory in [
+                        stage / "remotion",
+                        *(stage / "remotion").rglob("*"),
+                    ]:
+                        if directory.is_dir():
+                            directory.chmod(0o755)
                 for relative, payload in files.items():
                     target = stage / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
