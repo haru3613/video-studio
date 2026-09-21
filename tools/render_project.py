@@ -177,6 +177,14 @@ def start_job(project: Path, tools: Path) -> dict:
     }
 
 
+def failed_job_has_revised_inputs(project: Path, job: dict) -> bool:
+    """A failed snapshot may be replaced only by explicitly changed inputs."""
+    return (
+        job.get("status") == "failed"
+        and portable_jobs.project_revision(project) != job.get("revision")
+    )
+
+
 def superseded_paths(output: Path, preserve_assembly: bool = False) -> tuple:
     """Files the worker treats as evidence that this final render already ran."""
     stem = output.name.removesuffix(".mp4")
@@ -308,6 +316,14 @@ def run(project_value, tools_value) -> tuple[dict, int]:
                     }
                     return envelope(project, "ok", "render_running", receipt), 0
                 if durable["status"] == "failed":
+                    if failed_job_has_revised_inputs(project, durable):
+                        receipt = start_job(project, tools)
+                        return envelope(
+                            project,
+                            "ok",
+                            "render_started",
+                            {**receipt, "previous_final_preserved": True},
+                        ), 0
                     return envelope(project, "error", "render_failed", durable), 4
                 if durable["status"] in {"cancelled", "interrupted"}:
                     return envelope(project, "error", "render_aborted", durable), 4
@@ -346,6 +362,9 @@ def run(project_value, tools_value) -> tuple[dict, int]:
             # broken promotion, never permission to start over.
             return envelope(project, "error", "render_result_invalid", job), 4
         if durable["status"] == "failed":
+            if failed_job_has_revised_inputs(project, durable):
+                receipt = start_job(project, tools)
+                return envelope(project, "ok", "render_started", receipt), 0
             return envelope(project, "error", "render_failed", job), 4
         return envelope(project, "error", "render_aborted", job), 4
 

@@ -76,6 +76,7 @@ export const NarratedVideo: React.FC<NarratedVideoProps> = ({
       <SceneVisual
         event={event}
         sceneLabel={scene.label}
+        sceneStartMs={scene.startMs}
         format={format}
         palette={content.palette}
       />
@@ -92,7 +93,7 @@ export const NarratedVideo: React.FC<NarratedVideoProps> = ({
         <Audio
           src={staticFile(content.media.backgroundMusic.path)}
           loop
-          volume={0.12}
+          volume={content.media.backgroundMusic.volume ?? 0.12}
         />
       ) : null}
       {content.media.soundEffects.map((effect) => (

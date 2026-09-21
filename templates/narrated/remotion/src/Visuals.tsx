@@ -1,6 +1,10 @@
 import React from "react";
 import {
   Easing,
+  Img,
+  OffthreadVideo,
+  Sequence,
+  staticFile,
   interpolate,
   useCurrentFrame,
   useVideoConfig,
@@ -10,6 +14,7 @@ import type {NarratedContent, VisualEvent} from "./schema";
 type VisualProps = {
   event: VisualEvent;
   sceneLabel: string;
+  sceneStartMs: number;
   format: "landscape" | "portrait";
   palette: NarratedContent["palette"];
 };
@@ -86,11 +91,11 @@ const FilterVisual: React.FC<VisualProps> = ({
         width: "82%",
       }}
     >
-      {["Noise", "Pattern", "Baseline"].map((label, index) => {
-        const active = baseline ? index === 2 : index === 1;
+      {(event.visual?.labels ?? ["Noise", "Pattern", "Baseline"]).map((label, index) => {
+        const active = index === (event.visual?.activeIndex ?? (baseline ? 2 : 1));
         return (
           <div
-            key={label}
+            key={index}
             style={{
               width: vertical ? 600 : 320,
               height: vertical ? 210 : 340,
@@ -136,7 +141,8 @@ const DecisionVisual: React.FC<VisualProps> = ({
     ...clamp,
     easing: Easing.bezier(0.16, 1, 0.3, 1),
   });
-  const result = event.visualState === "decision.result";
+  const result = event.visual?.activeIndex === 2 || event.visualState === "decision.result";
+  const labels = event.visual?.labels ?? ["signal", "choice", "action"];
   const width = format === "portrait" ? 760 : 1050;
   const height = format === "portrait" ? 820 : 540;
 
@@ -156,9 +162,9 @@ const DecisionVisual: React.FC<VisualProps> = ({
       <circle cx="515" cy="125" r="42" fill={result ? palette.accentWarm : palette.surface} stroke={palette.accentWarm} strokeWidth="8" />
       <circle cx="930" cy="270" r="56" fill={result ? palette.accent : palette.surface} stroke={palette.accent} strokeWidth="9" />
       <path d="M902 269 l20 20 38-48" fill="none" stroke={palette.ink} strokeWidth="10" strokeLinecap="round" strokeLinejoin="round" opacity={result ? progress : 0.2} />
-      <text x="120" y="360" textAnchor="middle" fill={palette.muted} fontSize="34">signal</text>
-      <text x="515" y="70" textAnchor="middle" fill={palette.muted} fontSize="34">choice</text>
-      <text x="930" y="370" textAnchor="middle" fill={palette.ink} fontSize="38" fontWeight="700">action</text>
+      <text x="120" y="360" textAnchor="middle" fill={palette.muted} fontSize="34">{labels[0]}</text>
+      <text x="515" y="70" textAnchor="middle" fill={palette.muted} fontSize="34">{labels[1]}</text>
+      <text x="930" y="370" textAnchor="middle" fill={palette.ink} fontSize="38" fontWeight="700">{labels[2]}</text>
     </svg>
   );
 };
@@ -197,9 +203,18 @@ export const SceneVisual: React.FC<VisualProps> = (props) => {
       >
         {sceneLabel}
       </div>
-      {event.visualState.startsWith("signal.") ? <SignalVisual {...props} /> : null}
-      {event.visualState.startsWith("filter.") ? <FilterVisual {...props} /> : null}
-      {event.visualState.startsWith("decision.") ? <DecisionVisual {...props} /> : null}
+      {(event.visual?.kind === "signal" || event.visualState.startsWith("signal.")) ? <SignalVisual {...props} /> : null}
+      {(event.visual?.kind === "cards" || event.visualState.startsWith("filter.")) ? <FilterVisual {...props} /> : null}
+      {(event.visual?.kind === "steps" || event.visualState.startsWith("decision.")) ? <DecisionVisual {...props} /> : null}
+      {event.visual?.kind === "image" && event.visual.path ? (
+        <Img src={staticFile(event.visual.path)} style={{width: "90%", height: "65%", objectFit: event.visual.fit ?? "contain", borderRadius: 20}} />
+      ) : null}
+      {event.visual?.kind === "video" && event.visual.path ? (
+        <Sequence from={Math.round(props.sceneStartMs / 1000 * fps)} layout="none">
+          <OffthreadVideo muted src={staticFile(event.visual.path)} style={{width: "90%", height: "65%", objectFit: event.visual.fit ?? "contain", borderRadius: 20}} />
+        </Sequence>
+      ) : null}
+      {event.visual?.text ? <div style={{fontSize: format === "portrait" ? 38 : 34, maxWidth: "85%", textAlign: "center", lineHeight: 1.4}}>{event.visual.text}</div> : null}
     </div>
   );
 };

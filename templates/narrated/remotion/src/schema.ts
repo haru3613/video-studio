@@ -9,6 +9,14 @@ export type VisualEvent = {
   presenterState: PresenterState;
   startMs: number;
   endMs: number;
+  visual?: {
+    kind: "signal" | "cards" | "steps" | "image" | "video";
+    path?: string;
+    fit?: "contain" | "cover";
+    labels?: [string, string, string];
+    activeIndex?: number;
+    text?: string;
+  };
 };
 
 export type Scene = {
@@ -23,6 +31,7 @@ export type MediaTrack = {
   path: string;
   kind: "user_supplied_narration" | "synthetic_tone_not_speech" | "local_audio";
   label: string;
+  volume?: number;
 };
 
 export type SoundEffect = MediaTrack & {
@@ -59,6 +68,7 @@ const isFiniteNumber = (value: unknown): value is number =>
 
 const assertLocalPath = (value: string) => {
   if (
+    !value || value.includes("\\") ||
     value.startsWith("/") ||
     value.includes("..") ||
     /^[a-z][a-z0-9+.-]*:/i.test(value)
@@ -106,6 +116,18 @@ export const validateContent = (value: NarratedContent): NarratedContent => {
       ) {
         throw new Error(`event is not cue-locked: ${event.eventId}`);
       }
+      if (event.visual) {
+        const visual = event.visual;
+        if (!["signal", "cards", "steps", "image", "video"].includes(visual.kind)) {
+          throw new Error("unsupported visual kind");
+        }
+        if (visual.kind === "image" || visual.kind === "video") {
+          assertLocalPath(visual.path ?? "");
+          if (visual.fit && !["contain", "cover"].includes(visual.fit)) throw new Error("invalid media fit");
+        }
+        if (visual.labels && (visual.labels.length !== 3 || visual.labels.some((label) => typeof label !== "string" || !label.trim() || label.length > 60))) throw new Error("visual needs three bounded labels");
+        if (visual.activeIndex !== undefined && (!Number.isInteger(visual.activeIndex) || visual.activeIndex < 0 || visual.activeIndex > 2)) throw new Error("invalid active index");
+      }
       eventCursor = event.endMs;
     }
     if (eventCursor !== scene.endMs) {
@@ -120,16 +142,15 @@ export const validateContent = (value: NarratedContent): NarratedContent => {
   let captionCursor = 0;
   for (const caption of value.captions) {
     if (
-      caption.startMs !== captionCursor ||
+      !isFiniteNumber(caption.startMs) || !isFiniteNumber(caption.endMs) ||
+      caption.startMs < captionCursor ||
+      caption.endMs > value.durationMs ||
       caption.endMs <= caption.startMs ||
       !caption.text.trim()
     ) {
-      throw new Error(`caption timeline is not contiguous at ${caption.startMs}`);
+      throw new Error(`caption timeline overlaps or exceeds duration at ${caption.startMs}`);
     }
     captionCursor = caption.endMs;
-  }
-  if (captionCursor !== value.durationMs) {
-    throw new Error("captions do not cover durationMs");
   }
 
   for (const track of [
@@ -139,6 +160,7 @@ export const validateContent = (value: NarratedContent): NarratedContent => {
   ]) {
     if (track) {
       assertLocalPath(track.path);
+      if (track.volume !== undefined && (!isFiniteNumber(track.volume) || track.volume < 0 || track.volume > 1)) throw new Error("invalid track volume");
     }
   }
   return value;

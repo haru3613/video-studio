@@ -16,6 +16,10 @@ TARGET_TP = -1.0
 # AAC raised a real -2.0 dBTP encode to -0.06 dBTP; keep the release gate strict.
 ENCODE_TP = -3.0
 TARGET_TOLERANCE = 1.0
+# AAC quantization can move peaks a little during a corrective re-encode.  Keep
+# this guard below the final release ceiling instead of adding a peak limiter.
+CORRECTION_PEAK_GUARD = 0.25
+MAX_CORRECTION_DB = 2.0
 AUDIO_MIX_SCHEMA = "haru.audio_mix.v1"
 
 
@@ -185,6 +189,69 @@ def loudnorm_measure(ffmpeg, media):
     return data
 
 
+def bounded_gain_correction(measured):
+    """Return the transparent gain needed to meet the loudness gate safely.
+
+    loudnorm can select dynamic normalization for high-crest narration.  Its
+    reported second-pass result can then miss the requested integrated target
+    even after a conservative encoder peak target.  A small measured gain is
+    transparent; it is only allowed when the decoded true-peak headroom proves
+    it can remain below the strict final ceiling without limiting.
+    """
+    correction = TARGET_I - measured["input_i"]
+    if abs(correction) <= TARGET_TOLERANCE:
+        return 0.0
+    if abs(correction) > MAX_CORRECTION_DB:
+        raise RuntimeError(
+            "target loudness not reached "
+            f"(measured_i={measured['input_i']:.2f} LUFS, "
+            f"measured_tp={measured['input_tp']:.2f} dBTP, "
+            f"required_gain={correction:.2f} dB exceeds "
+            f"{MAX_CORRECTION_DB:.2f} dB bound)"
+        )
+    if correction > 0:
+        headroom = TARGET_TP - CORRECTION_PEAK_GUARD - measured["input_tp"]
+        if correction > headroom:
+            raise RuntimeError(
+                "target loudness not reached "
+                f"(measured_i={measured['input_i']:.2f} LUFS, "
+                f"measured_tp={measured['input_tp']:.2f} dBTP, "
+                f"required_gain={correction:.2f} dB exceeds "
+                f"safe_peak_headroom={max(0.0, headroom):.2f} dB)"
+            )
+    return correction
+
+
+def encode_gain_correction(ffmpeg, source, output, correction):
+    result = run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(source),
+            "-map",
+            "0",
+            "-map_metadata",
+            "0",
+            "-c",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-filter:a:0",
+            f"volume={correction:.6f}dB",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+    )
+    if result.returncode != 0 or not output.is_file():
+        raise RuntimeError("bounded loudness correction failed")
+
+
 def media_duration(ffprobe, media):
     result = run(
         [
@@ -309,6 +376,7 @@ def main(argv):
     if len(argv) not in (5, 6):
         return fail("usage: mix_final.py <pre-mix.mp4> <final.mp4> <expected> <verifier> [render-plan]")
     temporary = None
+    correction_temporary = None
     composed = None
     try:
         source = direct_file(argv[1])
@@ -384,8 +452,24 @@ def main(argv):
             raise RuntimeError("second-pass normalization type missing")
 
         measured = loudnorm_measure(ffmpeg, temporary)
-        if abs(measured["input_i"] - TARGET_I) > TARGET_TOLERANCE:
-            raise RuntimeError("target loudness not reached")
+        correction_db = bounded_gain_correction(measured)
+        if correction_db:
+            with tempfile.NamedTemporaryFile(
+                dir=output.parent, prefix=f".{output.stem}.correcting-", suffix=".mp4", delete=False
+            ) as handle:
+                correction_temporary = Path(handle.name)
+            encode_gain_correction(ffmpeg, temporary, correction_temporary, correction_db)
+            temporary.unlink()
+            temporary = correction_temporary
+            correction_temporary = None
+            measured = loudnorm_measure(ffmpeg, temporary)
+            if abs(measured["input_i"] - TARGET_I) > TARGET_TOLERANCE:
+                raise RuntimeError(
+                    "target loudness not reached after bounded correction "
+                    f"(measured_i={measured['input_i']:.2f} LUFS, "
+                    f"measured_tp={measured['input_tp']:.2f} dBTP, "
+                    f"applied_gain={correction_db:.2f} dB)"
+                )
         if measured["input_tp"] > TARGET_TP:
             raise RuntimeError(
                 f"true peak {measured['input_tp']:.2f} dBTP exceeds {TARGET_TP:.2f} dBTP"
@@ -458,6 +542,11 @@ def main(argv):
         if temporary is not None:
             try:
                 temporary.unlink()
+            except OSError:
+                pass
+        if correction_temporary is not None:
+            try:
+                correction_temporary.unlink()
             except OSError:
                 pass
         if composed is not None:

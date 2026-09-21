@@ -5,7 +5,8 @@ The command is provider-backed, but all identity, credentials, budget and voice
 configuration belongs to the operator. There are no bundled voices, API keys,
 account paths, pronunciation tables or spending limits.
 
-Required for a new ElevenLabs take:
+Required for a new provider-backed take:
+  * --provider or VIDEO_STUDIO_TTS_PROVIDER
   * --voice or VIDEO_STUDIO_TTS_VOICE_ID
   * ELEVENLABS_API_KEY or ELEVENLABS_API_KEY_PATH
   * --max-credits or VIDEO_STUDIO_TTS_MAX_CREDITS
@@ -34,7 +35,9 @@ from providers import (
     ProviderConfirmedFailure,
     ProviderError,
     ProviderSubmissionUnknown,
+    configured_provider,
     get_provider,
+    provider_names,
 )
 from spend_journal import (
     BudgetExceeded,
@@ -510,7 +513,13 @@ def _reconcile(
         raise SubmissionBlocked(
             "reconciliation request ID conflicts with the durable provider ID"
         )
-    records = provider.history_records([provider_request_id])
+    history_records = getattr(provider, "history_records", None)
+    if not callable(history_records):
+        raise SubmissionBlocked(
+            "provider cannot reconcile an unknown submission; spend remains "
+            "submission_unknown and retry is blocked"
+        )
+    records = history_records([provider_request_id])
     record = records.get(provider_request_id)
     if record is None:
         raise SubmissionBlocked(
@@ -531,7 +540,7 @@ def _reconcile(
         attempt.attempt_id,
         provider_request_id=provider_request_id,
         actual_credits=credits,
-        proof=f"elevenlabs_history_character_delta:{provider_request_id}:{credits}",
+        proof=f"provider_history_character_delta:{provider_request_id}:{credits}",
     )
     return (
         f"RECONCILED provider request {provider_request_id} as spent "
@@ -541,6 +550,12 @@ def _reconcile(
 
 def execute(arguments, *, provider=None, stage_hook=None) -> str:
     stage_hook = stage_hook or (lambda _stage, _attempt: None)
+    selected_provider = getattr(arguments, "provider", None)
+    # Test and legacy orchestration callers can inject an already-selected
+    # provider instance. The CLI path still requires --provider or the env.
+    if selected_provider is None and provider is not None:
+        selected_provider = provider.name
+    arguments.provider = configured_provider(selected_provider)
     voice = arguments.voice or VOICE
     if not voice:
         raise ValueError("pass --voice or set VIDEO_STUDIO_TTS_VOICE_ID")
@@ -785,7 +800,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--text")
     source.add_argument("--text-file")
     parser.add_argument("--out-base", required=True)
-    parser.add_argument("--provider", choices=["elevenlabs"], default="elevenlabs")
+    parser.add_argument("--provider", choices=provider_names())
     parser.add_argument("--voice")
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--speed", type=float, default=SPEED)
@@ -824,6 +839,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     arguments = parser.parse_args()
+    try:
+        arguments.provider = configured_provider(arguments.provider)
+    except ProviderError as error:
+        parser.error(str(error))
     if (
         len(arguments.previous_request_id) > 3
         or len(arguments.next_request_id) > 3

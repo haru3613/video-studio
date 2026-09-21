@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate cacheable ElevenLabs narration sections with official request stitching."""
+"""Generate cacheable provider-backed narration sections with local stitching."""
 
 from __future__ import annotations
 
@@ -23,8 +23,7 @@ from generate_narration_with_srt import (
     set_project_fixes,
 )
 import stt_align
-from providers import ProviderError
-from providers.elevenlabs import ElevenLabsProvider
+from providers import ProviderError, configured_provider, get_provider, provider_names
 from zh_normalize import normalize_zh
 
 # Fade applied at both edges of every section before concatenation. 60ms is far
@@ -249,6 +248,7 @@ def run_generator(*, section: dict, section_dir: Path, generator: Path,
                   normalize: bool, previous_ids: list[str], next_ids: list[str],
                   previous_text: str | None = None, next_text: str | None = None,
                   seed: int, force_budget: bool, retake: bool,
+                  provider: str,
                   voice: str | None = None,
                   pronunciation_overrides: Path | None = None,
                   spend_journal: Path | None = None,
@@ -261,7 +261,7 @@ def run_generator(*, section: dict, section_dir: Path, generator: Path,
     before = load_json(take_path)
     cmd = [
         sys.executable, str(generator), "--text-file", str(text_path),
-        "--out-base", str(out_base), "--seed", str(seed),
+        "--out-base", str(out_base), "--seed", str(seed), "--provider", provider,
     ]
     if voice:
         cmd.extend(["--voice", voice])
@@ -297,8 +297,8 @@ def run_generator(*, section: dict, section_dir: Path, generator: Path,
     generated = "OK wrote " in completed.stdout
     if generated and not after.get("request_id"):
         raise RuntimeError(
-            f"{section_id} was generated but ElevenLabs returned no request_id; "
-            "stopping before another paid section because official stitching cannot continue")
+            f"{section_id} was generated but {provider} returned no request_id; "
+            "stopping before another paid section because reconciliation cannot continue")
     return after, generated, completed.stdout.strip()
 
 
@@ -539,6 +539,7 @@ def main() -> None:
         help="shared journal cap; the child also enforces any environment cap",
     )
     parser.add_argument("--spend-journal")
+    parser.add_argument("--provider", choices=provider_names())
     # Voice is per-video, not per-repo: the module constant is only the default.
     # The voice pronunciation rules in the child generator (narration/pronunciation/
     # voice/) are voice-specific, so a non-default voice must be re-verified with
@@ -546,6 +547,10 @@ def main() -> None:
     parser.add_argument("--voice", default=None)
     parser.add_argument("--pronunciation-overrides")
     args = parser.parse_args()
+    try:
+        provider_name = configured_provider(args.provider)
+    except ProviderError as error:
+        parser.error(str(error))
     voice = args.voice or VOICE
     if not voice:
         parser.error("pass --voice or set VIDEO_STUDIO_TTS_VOICE_ID")
@@ -574,7 +579,7 @@ def main() -> None:
 
     generator = Path(__file__).with_name("generate_narration_with_srt.py")
     manifests = [load_json(section_dir / f"{item['id']}.take.json") for item in sections]
-    provider = ElevenLabsProvider()
+    provider = get_provider(provider_name)
     usage_before = None
 
     generated: list[dict] = []
@@ -594,6 +599,7 @@ def main() -> None:
             seed=args.seed_base + index,
             force_budget=args.force_budget,
             retake=section["id"] in args.retake_section,
+            provider=provider_name,
             voice=voice,
             pronunciation_overrides=overrides_path,
             spend_journal=spend_journal,
@@ -616,9 +622,12 @@ def main() -> None:
     request_ids = [item.get("request_id") for item in generated if item.get("request_id")]
     if request_ids:
         try:
+            history_costs = getattr(provider, "history_costs", None)
+            if not callable(history_costs):
+                raise ProviderError("provider does not support read-only cost reconciliation")
             exact_costs = {}
             for attempt in range(3):
-                exact_costs = provider.history_costs(request_ids)
+                exact_costs = history_costs(request_ids)
                 if len(exact_costs) == len(request_ids):
                     break
                 if attempt < 2:
@@ -639,7 +648,7 @@ def main() -> None:
 
     processed_text = normalize_zh(text) if args.normalize else text
     processed_text = apply_pronunciation_fixes(processed_text)
-    full_credits = ElevenLabsProvider().credits_for(processed_text, MODEL)
+    full_credits = provider.credits_for(processed_text, MODEL)
     report = credit_report(
         full_script_credits=full_credits,
         generated=generated,
@@ -653,6 +662,7 @@ def main() -> None:
         "source": str(text_path),
         "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
         "voice": voice,
+        "provider": provider_name,
         "model": MODEL,
         "normalize": args.normalize,
         "pronunciation_overrides_sha256": (

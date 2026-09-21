@@ -73,8 +73,17 @@ def public_job(project: Path, job: dict) -> dict:
         "output": "output/final.mp4",
         "log_available": has_log(project, job["job_id"]),
         "can_cancel": status in {"queued", "running", "cancel_requested"},
-        "can_resume": status in {"failed", "cancelled", "interrupted"},
+        "can_resume": can_resume(project, job),
     }
+
+
+def can_resume(project: Path, job: dict) -> bool:
+    if job.get("status") not in {"failed", "cancelled", "interrupted"}:
+        return False
+    try:
+        return portable_jobs.project_revision(project) == job.get("revision")
+    except (OSError, ValueError):
+        return False
 
 
 def read_job(project: Path, job_id: str) -> dict | None:
@@ -144,6 +153,29 @@ def has_log(project: Path, job_id: str) -> bool:
         return False
 
 
+def failure_log_path(project: Path, job: dict) -> Path | None:
+    """Return the worker-owned render detail only for a failed attempt."""
+    if job.get("status") != "failed" or not isinstance(job.get("epoch"), int):
+        return None
+    path = (
+        project
+        / "output/.staging"
+        / valid_job_id(job["job_id"])
+        / f"attempt-{job['epoch']}"
+        / "snapshot"
+        / project.name
+        / "output/final.mp4.render.log"
+    )
+    staging = project / "output/.staging"
+    try:
+        path.parent.resolve(strict=True).relative_to(staging.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if path.is_symlink() or not path.is_file():
+        return None
+    return path
+
+
 def redact(text: str) -> str:
     text = SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
     text = BEARER.sub("Bearer [REDACTED]", text)
@@ -170,15 +202,22 @@ def logs(project_value, job_id, limit=DEFAULT_LOG_BYTES):
         job = bound_job(project, job_id, read_only=True)
     except LookupError:
         return envelope(project, "error", "job_not_found"), 2
-    path = log_path(project, job_id)
-    try:
-        total = path.stat().st_size
-        with path.open("rb") as handle:
-            handle.seek(max(0, total - limit))
-            payload = handle.read(limit)
-    except FileNotFoundError:
-        total = 0
-        payload = b""
+    paths = [log_path(project, job_id)]
+    detail = failure_log_path(project, job)
+    if detail is not None:
+        paths.append(detail)
+    total = 0
+    chunks = []
+    for path in paths:
+        try:
+            size = path.stat().st_size
+            total += size
+            with path.open("rb") as handle:
+                handle.seek(max(0, size - limit))
+                chunks.append(handle.read(limit))
+        except FileNotFoundError:
+            continue
+    payload = b"\n".join(chunks)[-limit:]
     text = redact(payload.decode("utf-8", errors="replace"))
     return (
         envelope(
@@ -232,6 +271,16 @@ def resume(project_value, job_id, expected_tools_root=None):
         return envelope(project, "ok", "job_running", public_job(project, job)), 0
     if job["status"] == "succeeded":
         return envelope(project, "ok", "job_terminal", public_job(project, job)), 0
+    if not can_resume(project, job):
+        return (
+            envelope(
+                project,
+                "blocked",
+                "job_resume_revision_changed",
+                public_job(project, job),
+            ),
+            3,
+        )
     try:
         resumed = portable_jobs.resume(project, job_id)
     except ValueError:

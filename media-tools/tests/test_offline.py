@@ -23,7 +23,7 @@ import generate_sectioned_narration as sectioned
 import make_cover
 import stt_align
 import zh_normalize
-from providers import ProviderError
+from providers import ProviderError, TTSProvider, configured_provider, get_provider
 from providers import elevenlabs
 
 
@@ -94,6 +94,8 @@ class ConfigurationTest(unittest.TestCase):
                     "測試",
                     "--out-base",
                     str(Path(directory) / "take"),
+                    "--provider",
+                    "elevenlabs",
                     "--max-credits",
                     "10",
                 ],
@@ -112,6 +114,77 @@ class ConfigurationTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2)
         self.assertIn("VIDEO_STUDIO_TTS_VOICE_ID", result.stderr)
+
+    def test_generator_requires_explicit_provider_before_voice_or_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NARRATION / "generate_narration_with_srt.py"),
+                    "--text", "test", "--out-base", str(Path(directory) / "take"),
+                    "--voice", "a-voice", "--max-credits", "1",
+                ],
+                capture_output=True, text=True,
+                env={key: value for key, value in os.environ.items()
+                     if key not in {"VIDEO_STUDIO_TTS_PROVIDER", "ELEVENLABS_API_KEY", "ELEVENLABS_API_KEY_PATH"}},
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("VIDEO_STUDIO_TTS_PROVIDER", result.stderr)
+
+    def test_sectioned_generator_requires_explicit_provider_before_voice_or_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "script.txt"
+            source.write_text("test", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NARRATION / "generate_sectioned_narration.py"),
+                    "--text-file", str(source), "--out-base", str(root / "take"),
+                    "--voice", "a-voice", "--max-credits", "1",
+                ],
+                capture_output=True, text=True,
+                env={key: value for key, value in os.environ.items()
+                     if key not in {"VIDEO_STUDIO_TTS_PROVIDER", "ELEVENLABS_API_KEY", "ELEVENLABS_API_KEY_PATH"}},
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("VIDEO_STUDIO_TTS_PROVIDER", result.stderr)
+
+    def test_provider_can_be_selected_from_environment(self):
+        with mock.patch.dict(os.environ, {"VIDEO_STUDIO_TTS_PROVIDER": "elevenlabs"}, clear=False):
+            self.assertEqual(configured_provider(None), "elevenlabs")
+
+    def test_installed_provider_entrypoint_is_loaded_by_finite_name(self):
+        class FixtureProvider(TTSProvider):
+            name = "fixture"
+
+            def credits_for(self, text, model):
+                return 1
+
+            def synthesize(self, text, *, voice, model, stability, speed, **context):
+                raise AssertionError("offline fixture must not synthesize")
+
+        class EntryPoint:
+            name = "fixture"
+
+            def load(self):
+                return FixtureProvider
+
+        with mock.patch("providers._entry_points", return_value={"fixture": EntryPoint()}):
+            self.assertEqual(get_provider("fixture").name, "fixture")
+            with self.assertRaisesRegex(ProviderError, "unknown TTS provider"):
+                get_provider("fixture; arbitrary-module")
+
+    def test_provider_plugin_load_failure_is_safe_and_does_not_fall_back(self):
+        class BrokenEntryPoint:
+            name = "broken"
+
+            def load(self):
+                raise RuntimeError("fixture load failed")
+
+        with mock.patch("providers._entry_points", return_value={"broken": BrokenEntryPoint()}):
+            with self.assertRaisesRegex(ProviderError, "could not load TTS provider"):
+                get_provider("broken")
 
     def test_g2p_fails_closed_without_optional_models(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -128,6 +128,40 @@ class JobInterfaceTest(unittest.TestCase):
         self.assertNotIn("abc.def.ghi", data["text"])
         self.assertNotIn("user:password", data["text"])
 
+    def test_failed_job_logs_include_redacted_nested_render_log(self):
+        cancelled, code = job_interface.cancel(self.project, self.job_id)
+        self.assertEqual((code, cancelled["code"]), (0, "job_cancelled"))
+        connection = portable_jobs._connect(self.project)
+        try:
+            connection.execute(
+                "UPDATE jobs SET status='failed', error_code='render_worker_failed' WHERE job_id=?",
+                (self.job_id,),
+            )
+        finally:
+            connection.close()
+        job = portable_jobs.get_job(self.project, self.job_id, refresh=False)
+        path = (
+            self.project
+            / "output/.staging"
+            / self.job_id
+            / f"attempt-{job['epoch']}"
+            / "snapshot"
+            / self.project.name
+            / "output/final.mp4.render.log"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            """OPENAI_API_KEY=sk-testsecrettoken123456
+mix did not reach target
+""",
+            encoding="utf-8",
+        )
+
+        response, code = job_interface.logs(self.project, job["job_id"], 1024)
+        self.assertEqual((code, response["code"]), (0, "job_logs"))
+        self.assertIn("mix did not reach target", response["data"]["text"])
+        self.assertNotIn("testsecrettoken", response["data"]["text"])
+
     def test_invalid_job_id_cannot_cancel_an_owned_worker(self):
         with self.assertRaises(ValueError):
             job_interface.cancel(self.project, "../" + self.job_id)
@@ -170,6 +204,19 @@ class JobInterfaceTest(unittest.TestCase):
         self.assertEqual((resumed_code, resumed["code"]), (0, "job_resumed"))
         self.assertEqual(resumed["data"]["epoch"], 2)
         self.wait_for({"running"})
+
+    def test_changed_inputs_make_resume_unavailable_with_a_specific_blocker(self):
+        response, code = job_interface.cancel(self.project, self.job_id)
+        self.assertEqual((code, response["code"]), (0, "job_cancelled"))
+        (self.project / "remotion/src/index.ts").write_text(
+            "export const fixture = 'revised';", encoding="utf-8"
+        )
+
+        status, code = job_interface.status(self.project, self.job_id)
+        self.assertEqual((code, status["code"]), (0, "job_status"))
+        self.assertFalse(status["data"]["can_resume"])
+        blocked, code = job_interface.resume(self.project, self.job_id, self.tools)
+        self.assertEqual((code, blocked["code"]), (3, "job_resume_revision_changed"))
 
     def test_fixed_wrapper_rejects_unknown_actions_and_returns_json(self):
         invalid = subprocess.run(

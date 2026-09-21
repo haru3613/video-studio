@@ -51,7 +51,7 @@ class TTSProvider(ABC):
 
     @abstractmethod
     def synthesize(self, text: str, *, voice: str, model: str,
-                   stability: float, speed: float) -> SynthesisResult:
+                   stability: float, speed: float, **request_context) -> SynthesisResult:
         ...
 
     @abstractmethod
