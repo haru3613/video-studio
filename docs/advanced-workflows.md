@@ -16,7 +16,17 @@ video-studio job logs --project-root "$HOME/VideoStudio/projects/my-video" \
 ```
 
 If inputs did not change, resume that exact failed job with the active project
-lease. If you corrected narration, subtitles, scenes, or media, prepare and
+lease:
+
+```sh
+video-studio job resume --project-root "$HOME/VideoStudio/projects/my-video" \
+  --job-id '<job_id>' --owner local --lease-id '<lease_id>' \
+  --idempotency-key resume-my-video-1
+```
+
+For `ENOSPC` / “no space left on device”, first free space for render frames and
+build caches, then resume. Do not delete project state to clear a failed job.
+If you corrected narration, subtitles, scenes, or media, prepare and
 render with new idempotency keys. Video Studio creates a new job for the new
 input revision and retains the earlier job history and final until a verified
 replacement is promoted. See [user media](user-media.md#retry-only-the-failed-work)

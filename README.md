@@ -8,7 +8,10 @@ Use the CLI or connect through MCP.
 
 [Make your first video](docs/quickstart.md) · [Connect your agent](docs/mcp-quickstart.md) · [Use your own media](docs/user-media.md)
 
-<!-- Showcase: insert inspected silent sample preview and local review screenshot. -->
+[![Silent preview of the quickstart explainer: choose one next step, make progress visible, then review and revise.](https://github.com/user-attachments/assets/e0ba4c6e-d4a3-464a-ae8a-5a0eee339e32)](docs/quickstart.md)
+
+*Silent preview from the included sample, after one heading change.
+[Static frame](https://github.com/user-attachments/assets/0fd0fe72-886a-4d65-a14e-40a603544ffc) · [Recreate it](docs/quickstart.md) · [Media provenance](docs/showcase.md)*
 
 Video Studio is self-hosted. Your files and render jobs live on your machine
 or private server; there is no Video Studio cloud account. Speech generation
@@ -38,6 +41,8 @@ to help you find what went wrong.
    you want changed.
 3. Have the agent read the feedback, update the project, and render the next
    version. Export the MP4 and SRT when you're happy with the result.
+
+![Actual local review page showing the sample video and a comment attached to 00:05.](https://github.com/user-attachments/assets/c987092c-993f-4a5e-9fe3-102066722ff7)
 
 After connecting the tools, a starting request can be:
 
@@ -75,7 +80,9 @@ Chrome/Chromium. Current test targets are macOS arm64 and Ubuntu 24.04 x86_64.
 
 Video Studio is an early release for people comfortable using a coding agent
 or terminal. The browser UI is for reviewing video and leaving feedback;
-project changes are made through the agent, CLI, or project files.
+project changes are made through the agent, CLI, or project files. The current
+review UI uses Traditional Chinese labels; the walkthrough names the relevant
+controls.
 
 Local rendering, review, corrected-input retries, and export have been exercised.
 See [validation evidence](docs/validation.md) and the

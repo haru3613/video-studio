@@ -103,9 +103,10 @@ the URL, open that file locally to copy the code, and sign in within five minute
 Keep the terminal running while you review. If the default port is occupied,
 add `--port 8791` and use the displayed address.
 
-Open `first-video`, play the current video, and leave a timestamped comment on
-something you want changed. The current review UI uses Traditional Chinese;
-the comment action is **加入留言** (add comment). For example: “Change the first heading to One step,
+In the project overview, select **待整理** (Unsorted) to find a newly created
+project, then open `first-video`. The current review UI uses Traditional Chinese.
+Play the video or use **＋5 秒** to seek, click **在這一刻留言** (comment at this
+moment), and save your text with **加入留言** (add comment). For example: “Change the first heading to One step,
 done well.” The comment stays tied to the video version you watched.
 
 Return to the terminal and press **Ctrl+C** to stop the review server before
@@ -145,6 +146,8 @@ video-studio job status --project-root "$STUDIO_PROJECT" --job-id "$STUDIO_JOB_I
 ```
 
 Again, wait for `succeeded`, then reopen the review UI to inspect the change.
+The comment's timestamp still opens the version you originally reviewed. After
+checking the new heading, use **標記已處理** (mark resolved) on that comment.
 Stop the UI with Ctrl+C when you return to the terminal. Use a new idempotency
 key for each changed request; reusing a key replays the earlier request.
 The preceding finished video remains available if a retake fails.
