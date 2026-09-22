@@ -9,6 +9,10 @@ is retained unchanged. Pronunciation and semantic alignment still need review.
 
 ## CLI
 
+For a complete first run, follow the [first video walkthrough](quickstart.md).
+It includes installation, job polling, local review, revisions, export, and
+lease release. This page documents the input spec for your own material.
+
 Start with an installed `video-studio` and an external workspace:
 
 ```sh
@@ -46,10 +50,14 @@ video-studio run --project-root "$HOME/VideoStudio/projects/my-video" \
   --idempotency-key render-my-video-1
 ```
 
-The installed runtime prints a job ID. Poll it with `video-studio job status`,
-inspect `job logs`, then open `video-studio ui --workspace "$HOME/VideoStudio"`.
-See the README for delivery/export. Technical delivery does not mean editorial
-or publication approval.
+The render response contains a job ID. Check it with
+`video-studio job status --project-root "$HOME/VideoStudio/projects/my-video" --job-id '<job_id>'`
+until `data.status` is `succeeded`, then open
+`video-studio ui --workspace "$HOME/VideoStudio"`.
+The [review and export steps](quickstart.md#4-watch-it-and-leave-feedback)
+show the rest of the flow. When adapting them here, keep using your `my-video`
+project path and current lease. Technical delivery does not mean editorial or
+publication approval.
 
 Relative `file` paths are resolved against the spec's directory. The CLI copies
 local regular files into the workspace inbox, stages them for the lease owner,
