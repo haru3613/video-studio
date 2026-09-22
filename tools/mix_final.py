@@ -20,6 +20,10 @@ TARGET_TOLERANCE = 1.0
 # this guard below the final release ceiling instead of adding a peak limiter.
 CORRECTION_PEAK_GUARD = 0.25
 MAX_CORRECTION_DB = 2.0
+# A final AAC encode can overshoot the decoded peak after a safe loudness
+# correction. Only recover a small, measured overshoot; larger failures remain
+# actionable rather than being hidden by a limiter.
+MAX_PEAK_RECOVERY_DB = 0.5
 AUDIO_MIX_SCHEMA = "haru.audio_mix.v1"
 
 
@@ -220,6 +224,22 @@ def bounded_gain_correction(measured):
                 f"safe_peak_headroom={max(0.0, headroom):.2f} dB)"
             )
     return correction
+
+
+def bounded_peak_recovery(measured):
+    """Return a small attenuation for a post-encode AAC peak overshoot."""
+    if measured["input_tp"] <= TARGET_TP:
+        return 0.0
+    attenuation = TARGET_TP - CORRECTION_PEAK_GUARD - measured["input_tp"]
+    if attenuation < -MAX_PEAK_RECOVERY_DB:
+        raise RuntimeError(
+            "true peak recovery exceeds bound "
+            f"(measured_i={measured['input_i']:.2f} LUFS, "
+            f"measured_tp={measured['input_tp']:.2f} dBTP, "
+            f"required_attenuation={attenuation:.2f} dB exceeds "
+            f"{MAX_PEAK_RECOVERY_DB:.2f} dB bound)"
+        )
+    return attenuation
 
 
 def encode_gain_correction(ffmpeg, source, output, correction):
@@ -469,6 +489,24 @@ def main(argv):
                     f"(measured_i={measured['input_i']:.2f} LUFS, "
                     f"measured_tp={measured['input_tp']:.2f} dBTP, "
                     f"applied_gain={correction_db:.2f} dB)"
+                )
+        peak_recovery_db = bounded_peak_recovery(measured)
+        if peak_recovery_db:
+            with tempfile.NamedTemporaryFile(
+                dir=output.parent, prefix=f".{output.stem}.peak-recovery-", suffix=".mp4", delete=False
+            ) as handle:
+                correction_temporary = Path(handle.name)
+            encode_gain_correction(ffmpeg, temporary, correction_temporary, peak_recovery_db)
+            temporary.unlink()
+            temporary = correction_temporary
+            correction_temporary = None
+            measured = loudnorm_measure(ffmpeg, temporary)
+            if abs(measured["input_i"] - TARGET_I) > TARGET_TOLERANCE:
+                raise RuntimeError(
+                    "target loudness not reached after peak recovery "
+                    f"(measured_i={measured['input_i']:.2f} LUFS, "
+                    f"measured_tp={measured['input_tp']:.2f} dBTP, "
+                    f"applied_attenuation={peak_recovery_db:.2f} dB)"
                 )
         if measured["input_tp"] > TARGET_TP:
             raise RuntimeError(

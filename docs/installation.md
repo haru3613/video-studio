@@ -48,12 +48,6 @@ file, such as `~/.zshrc` or `~/.bashrc`, then open a new shell. You can also
 invoke the two absolute paths above directly; do not point an MCP client at a
 binary under `pipeline/target/` in a mutable checkout.
 
-Confirm the installed runtime and dependencies:
-
-```sh
-video-studio doctor
-```
-
 ## Create local working directories
 
 Projects, review state, staged inputs, and renders belong in a workspace outside
@@ -75,8 +69,30 @@ state under that one root. The delivery directory must be an absolute path.
 Video Studio does not upload or publish from this setting; it is where a
 verified delivery bundle is written when you explicitly export it.
 
+Now check the installed runtime, tools, and initialized workspace:
+
+```sh
+video-studio doctor
+```
+
+Look for `code: doctor_ready`. If `data.checks.workspace` is false, confirm the
+workspace path and rerun initialization. Running this check before creating a
+workspace returns `doctor_blocked` even when the software is installed.
+
 You are ready to follow the [first video walkthrough](quickstart.md), or to
 connect a local agent through [stdio MCP](mcp-quickstart.md).
+
+## If installation or the first check stops
+
+| Message or check | What to do |
+| --- | --- |
+| `Install uv` or `Install Rust` | Install the missing prerequisite, reopen the terminal, then run `scripts/install` again. |
+| `Install requires clean committed source` | Use a fresh clone for installation, or review and commit your intentional source edits. Keep project media outside the checkout. |
+| `data.checks.workspace` is false | Set `VIDEO_STUDIO_WORKSPACE` and initialize that workspace before running `video-studio doctor`. |
+| `node`, `ffmpeg`, or `ffprobe` is false | The installed workflow checks standard tool locations: `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`. A tool available only through a shell's version manager may need an installation in one of those locations. |
+
+The first install downloads/builds dependencies; completion time depends on the
+machine and cache. The installer finishes by printing both launcher paths.
 
 ## Maintainers and contributors
 

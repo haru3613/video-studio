@@ -104,7 +104,8 @@ Keep the terminal running while you review. If the default port is occupied,
 add `--port 8791` and use the displayed address.
 
 Open `first-video`, play the current video, and leave a timestamped comment on
-something you want changed. For example: “Change the first heading to One step,
+something you want changed. The current review UI uses Traditional Chinese;
+the comment action is **加入留言** (add comment). For example: “Change the first heading to One step,
 done well.” The comment stays tied to the video version you watched.
 
 Return to the terminal and press **Ctrl+C** to stop the review server before

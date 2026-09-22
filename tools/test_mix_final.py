@@ -213,6 +213,37 @@ class MixFinalTest(unittest.TestCase):
                 "input_tp": -2.0,
             })
 
+    def test_aac_peak_overshoot_uses_small_measured_attenuation(self):
+        attenuation = MIXER_MODULE.bounded_peak_recovery({
+            "input_i": -14.03,
+            "input_tp": -0.89,
+        })
+
+        self.assertAlmostEqual(attenuation, -0.36)
+
+    def test_large_aac_peak_overshoot_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "true peak recovery exceeds bound"):
+            MIXER_MODULE.bounded_peak_recovery({
+                "input_i": -14.0,
+                "input_tp": -0.40,
+            })
+
+    def test_synthetic_aac_peak_overshoot_is_recovered_without_touching_source(self):
+        overshot = self.source.parent / "overshot.mp4"
+        recovered = self.source.parent / "recovered.mp4"
+        source_digest = self.sha256(self.source)
+
+        MIXER_MODULE.encode_gain_correction("ffmpeg", self.source, overshot, 50.7)
+        overshot_measurement = MIXER_MODULE.loudnorm_measure("ffmpeg", overshot)
+        attenuation = MIXER_MODULE.bounded_peak_recovery(overshot_measurement)
+        MIXER_MODULE.encode_gain_correction("ffmpeg", overshot, recovered, attenuation)
+        recovered_measurement = MIXER_MODULE.loudnorm_measure("ffmpeg", recovered)
+
+        self.assertGreater(overshot_measurement["input_tp"], -1.0)
+        self.assertLess(attenuation, 0)
+        self.assertLessEqual(recovered_measurement["input_tp"], -1.0)
+        self.assertEqual(self.sha256(self.source), source_digest)
+
     def test_synthetic_gain_correction_changes_only_the_derived_audio(self):
         corrected = self.source.parent / "corrected.mp4"
         source_digest = self.sha256(self.source)
