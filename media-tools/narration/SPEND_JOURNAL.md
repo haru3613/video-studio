@@ -82,8 +82,8 @@ are present.
 
 ## Reconciliation
 
-If submission is unknown, find the request in ElevenLabs history and run the
-same generator command with:
+If submission is unknown, use the selected provider's read-only history to find
+the request and run the same generator command with:
 
 ```sh
 --reconcile-request-id REQUEST_ID

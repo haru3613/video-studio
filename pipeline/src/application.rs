@@ -578,6 +578,7 @@ impl CommandExecutor for ProcessExecutor {
                     "ELEVENLABS_API_KEY_PATH",
                     "VIDEO_STUDIO_TTS_VOICE_ID",
                     "VIDEO_STUDIO_TTS_MODEL",
+                    "VIDEO_STUDIO_TTS_PROVIDER",
                     "VIDEO_STUDIO_TTS_MAX_CREDITS",
                     "VIDEO_STUDIO_TTS_SPEND_JOURNAL",
                     "VIDEO_STUDIO_TTS_PYTHON",
@@ -1523,6 +1524,21 @@ pub fn run_next(
             repo.join("scripts/verify-project"),
             vec![project.clone().into_os_string()],
         ),
+        // Preparation consumes only the normalized project spec and staged
+        // inputs already owned by this project.  The owner is provenance for
+        // the helper's staged-media lookup; it is never caller-selected argv.
+        "prepare-project" => {
+            if request.tools_root.is_some() {
+                return AppResult::invalid_input();
+            }
+            (
+                repo.join("scripts/prepare-project"),
+                vec![
+                    project.clone().into_os_string(),
+                    request.lease.owner.clone().into(),
+                ],
+            )
+        }
         "render-project" => {
             let Some(tools_root) = &request.tools_root else {
                 return AppResult::invalid_input();
@@ -1673,6 +1689,27 @@ pub fn run_next(
         }
         Ok(result)
             if result.exit_code == Some(0)
+                && request.runner == "prepare-project"
+                && project_prepared(&result.data, &project) =>
+        {
+            AppResult::ok("project_prepared", &project, result.data)
+        }
+        Ok(result)
+            if result.exit_code == Some(3)
+                && request.runner == "prepare-project"
+                && project_prepare_blocked(&result.data, &project) =>
+        {
+            let code = result
+                .data
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("prepare_blocked")
+                .to_owned();
+            AppResult::blocked_with_data(&code, &project, result.data)
+        }
+        Ok(result)
+            if result.exit_code == Some(0)
                 && request.runner == "render-project"
                 && render_ready(&result.data, &project) =>
         {
@@ -1775,6 +1812,65 @@ pub fn run_next(
         Err(StoreError::Io(_)) => AppResult::error("internal_error", Some(&project)),
         Err(_) => AppResult::error("internal_error", Some(&project)),
     }
+}
+
+fn project_prepared(data: &Option<Value>, project: &Path) -> bool {
+    let Some(Value::Object(result)) = data else {
+        return false;
+    };
+    let Ok(spec) = crate::Artifact::from_path(project, &project.join("project-spec.json")) else {
+        return false;
+    };
+    let Some(payload) = result.get("data").and_then(Value::as_object) else {
+        return false;
+    };
+    result.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && result.get("outcome").and_then(Value::as_str) == Some("ok")
+        && result.get("code").and_then(Value::as_str) == Some("project_prepared")
+        && result.get("project").and_then(Value::as_str) == Some(project.to_string_lossy().as_ref())
+        && payload.get("schema").and_then(Value::as_str)
+            == Some("video_studio.project_preparation.v1")
+        && payload.get("project").and_then(Value::as_str)
+            == project.file_name().and_then(|name| name.to_str())
+        && payload.get("spec_sha256").and_then(Value::as_str) == Some(&spec.sha256)
+        && payload
+            .get("duration_seconds")
+            .and_then(Value::as_f64)
+            .is_some_and(|duration| duration.is_finite() && duration > 0.0)
+        && payload.get("narration_source").and_then(Value::as_str) == Some("import")
+        && payload.get("asset_count").and_then(Value::as_u64).is_some()
+        && payload.get("template").and_then(Value::as_str) == Some("narrated")
+        && payload
+            .get("requires_dependency_install")
+            .and_then(Value::as_bool)
+            .is_some()
+}
+
+fn project_prepare_blocked(data: &Option<Value>, project: &Path) -> bool {
+    let Some(Value::Object(result)) = data else {
+        return false;
+    };
+    result.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && result.get("outcome").and_then(Value::as_str) == Some("blocked")
+        && result.get("project").and_then(Value::as_str) == Some(project.to_string_lossy().as_ref())
+        && result
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| {
+                !code.is_empty()
+                    && code.len() <= 128
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            })
+        && result
+            .get("data")
+            .and_then(Value::as_object)
+            .is_some_and(|data| {
+                data.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| !message.is_empty() && message.len() <= 1000)
+            })
 }
 
 pub fn pronunciation_review(
@@ -2849,7 +2945,10 @@ const STAGED_PRODUCE_TARGETS: &[(&str, &[&str])] = &[
         "storyboard_data",
         &["storyboard-final-timed.json", "editorial-contract.json"],
     ),
-    ("metadata", &["claims.json", "publish-metadata.json"]),
+    (
+        "metadata",
+        &["claims.json", "publish-metadata.json", "project-spec.json"],
+    ),
 ];
 
 pub fn produce_staged_artifact(
@@ -2990,6 +3089,10 @@ pub fn produce_artifact(
         OsString::from("--produced-by"),
         request.produced_by.clone().into(),
     ];
+    let mut arguments = arguments.to_vec();
+    if request.artifact == "project-spec.json" {
+        arguments.push(OsString::from("--force"));
+    }
     let token = &request.lease.capability;
     let mut executor_failed = false;
     let execution = ProjectStore::new(&project).with_verified_lease_identity_at(
@@ -3812,7 +3915,10 @@ pub fn mutate_job(
                 AppResult::ok(&code, &project, data)
             } else if result.exit_code == Some(3)
                 && outcome == "blocked"
-                && code == "job_commit_in_progress"
+                && matches!(
+                    code.as_str(),
+                    "job_commit_in_progress" | "job_resume_revision_changed"
+                )
                 && data_valid
             {
                 AppResult::blocked_with_data(&code, &project, data)

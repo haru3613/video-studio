@@ -201,6 +201,41 @@ for line in sys.stdin:
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(unix)]
+fn write_prepare_test_server(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, r###"#!/usr/bin/python3 -S
+import json, os, sys
+log = os.environ['VIDEO_STUDIO_PREPARE_LOG']
+for line in sys.stdin:
+    request=json.loads(line)
+    if 'id' not in request: continue
+    if request.get('method') == 'initialize':
+        value={'protocolVersion':request['params']['protocolVersion'],'capabilities':{'tools':{}},'serverInfo':{'name':'prepare-test','version':'1'}}
+    elif request.get('method') == 'tools/call':
+        name=request['params']['name']; args=request['params']['arguments']
+        with open(log,'a') as out: out.write(json.dumps({'tool':name,'arguments':args})+'\n')
+        project=args['project_root']
+        if name == 'artifact_stage':
+            assert args['owner']=='agent' and args['lease_id']=='lease-1'
+            stage='a'*31 + str(1 if args['role'] != 'metadata' else 2)
+            data={'stage_id':stage,'role':args['role']}
+            if args['role'] != 'metadata': data['sha256']='7dacf5efa990a4580406d4659c1547ca5ff06fd5967011ab7f64407c80e74cd4'
+            response={'schema_version':1,'outcome':'ok','code':'artifact_staged','project':project,'data':data}
+        elif name == 'produce_staged_artifact':
+            assert args['artifact']=='project-spec.json' and args['produced_by']=='video-studio prepare'
+            response={'schema_version':1,'outcome':'ok','code':'artifact_produced','project':project,'data':{}}
+        elif name == 'run_next':
+            assert args['runner']=='prepare-project' and 'tools_root' not in args
+            response={'schema_version':1,'outcome':'ok','code':'project_prepared','project':project,'data':{'schema':'video_studio.project_preparation.v1'}}
+        else: raise AssertionError(name)
+        value={'content':[],'structuredContent':response,'isError':False}
+    else: value={'tools':[]}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':value}),flush=True)
+"###).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn tools_discovers_the_complete_real_mcp_surface() {
     let _server = REAL_SERVER_LOCK
@@ -760,6 +795,135 @@ fn named_job_commands_send_typed_payloads_without_executables() {
     ]);
     assert!(resume.status.success());
     assert_eq!(output_json(&resume)["code"], "job_resumed");
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_stages_normalized_spec_then_runs_fixed_preparer_and_rejects_unsafe_assets() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let project = workspace.join("projects/demo");
+    let server = directory.path().join("prepare-server");
+    let log = directory.path().join("prepare.log");
+    fs::create_dir_all(workspace.join("inbox")).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    write_prepare_test_server(&server);
+    let audio = directory.path().join("voice.wav");
+    fs::write(&audio, b"local audio bytes").unwrap();
+    let spec = directory.path().join("spec.json");
+    let write_spec = |title: &str| {
+        fs::write(&spec, serde_json::to_vec(&json!({
+            "schema":"video_studio.project_spec.v1", "title":title, "format":"landscape",
+            "narration":{"mode":"import","audio":"voice","captions":"captions"},
+            "assets":[
+              {"id":"voice","kind":"audio","file":audio},
+              {"id":"captions","kind":"subtitle","stage_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+            ],
+            "scenes":[{"id":"opening","start_seconds":0,"end_seconds":1,"heading":"Opening","visual":{"kind":"signal"}}]
+        })).unwrap()).unwrap();
+    };
+    let run = |key: &str| {
+        Command::new(env!("CARGO_BIN_EXE_video-studio"))
+            .arg("--json")
+            .arg("--server")
+            .arg(&server)
+            .args([
+                "prepare",
+                "--project-root",
+                project.to_str().unwrap(),
+                "--spec",
+                spec.to_str().unwrap(),
+                "--owner",
+                "agent",
+                "--lease-id",
+                "lease-1",
+                "--idempotency-key",
+                key,
+            ])
+            .env("VIDEO_STUDIO_PREPARE_LOG", &log)
+            .output()
+            .unwrap()
+    };
+
+    write_spec("First import");
+    let first = run("prepare-one");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(output_json(&first)["code"], "project_prepared");
+    assert!(
+        !workspace.join("inbox").read_dir().unwrap().next().is_some(),
+        "private copied input must be removed after staging"
+    );
+
+    write_spec("Changed import");
+    let second = run("prepare-two");
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let calls: Vec<Value> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        8,
+        "each prepare is stage asset, stage spec, produce, run"
+    );
+    for offset in [0, 4] {
+        assert_eq!(calls[offset]["tool"], "artifact_stage");
+        assert_eq!(calls[offset + 1]["arguments"]["role"], "metadata");
+        let normalized: Value = serde_json::from_str(
+            calls[offset + 1]["arguments"]["inline_text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            normalized["assets"][0],
+            json!({"id":"voice","kind":"audio","stage_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"})
+        );
+        assert_eq!(calls[offset + 2]["tool"], "produce_staged_artifact");
+        assert_eq!(calls[offset + 3]["tool"], "run_next");
+    }
+    assert_ne!(
+        calls[0]["arguments"]["idempotency_key"],
+        calls[4]["arguments"]["idempotency_key"]
+    );
+
+    let symlink = directory.path().join("unsafe.wav");
+    std::os::unix::fs::symlink(&audio, &symlink).unwrap();
+    let unsafe_spec = directory.path().join("unsafe-spec.json");
+    let mut unsafe_value: Value = serde_json::from_slice(&fs::read(&spec).unwrap()).unwrap();
+    unsafe_value["assets"][0]["file"] = json!(symlink);
+    fs::write(&unsafe_spec, serde_json::to_vec(&unsafe_value).unwrap()).unwrap();
+    let unsafe_output = Command::new(env!("CARGO_BIN_EXE_video-studio"))
+        .arg("--json")
+        .arg("--server")
+        .arg(&server)
+        .args([
+            "prepare",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--spec",
+            unsafe_spec.to_str().unwrap(),
+            "--owner",
+            "agent",
+            "--lease-id",
+            "lease-1",
+            "--idempotency-key",
+            "unsafe",
+        ])
+        .env("VIDEO_STUDIO_PREPARE_LOG", &log)
+        .output()
+        .unwrap();
+    assert_eq!(unsafe_output.status.code(), Some(2));
+    assert_eq!(output_json(&unsafe_output)["code"], "invalid_input");
 }
 
 #[cfg(unix)]

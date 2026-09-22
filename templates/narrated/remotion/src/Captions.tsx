@@ -26,7 +26,8 @@ export const Captions: React.FC<CaptionsProps> = ({
     captions.find(
       (candidate) =>
         candidate.startMs <= currentMs && currentMs < candidate.endMs,
-    ) ?? captions[captions.length - 1];
+    );
+  if (!caption) return null;
   const localFrame = frame - (caption.startMs / 1000) * fps;
 
   return (

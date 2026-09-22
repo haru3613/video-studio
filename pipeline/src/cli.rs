@@ -1,8 +1,11 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 #[cfg(test)]
 use clap::CommandFactory;
@@ -12,6 +15,7 @@ use rmcp::{
     transport::TokioChildProcess,
 };
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -74,6 +78,8 @@ enum Command {
     Verify(ProjectArgs),
     /// Run one allowlisted workflow step while holding a lease.
     Run(RunArgs),
+    /// Stage a bounded project specification and prepare its local edit source.
+    Prepare(PrepareArgs),
     /// Manage the opaque project lease.
     Lease {
         #[command(subcommand)]
@@ -179,6 +185,21 @@ struct RunArgs {
     /// never an executable or shell command.
     #[arg(long, value_name = "PATH")]
     tools_root: Option<PathBuf>,
+    #[arg(long)]
+    idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+struct PrepareArgs {
+    #[arg(long, value_name = "PATH")]
+    project_root: PathBuf,
+    /// JSON project specification (at most 1 MiB).
+    #[arg(long, value_name = "JSON_FILE")]
+    spec: PathBuf,
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    lease_id: String,
     #[arg(long)]
     idempotency_key: String,
 }
@@ -446,6 +467,14 @@ enum Request {
         status: String,
         idempotency_key: String,
     },
+    Prepare {
+        project_root: PathBuf,
+        spec_parent: PathBuf,
+        spec: Value,
+        owner: String,
+        lease_id: String,
+        idempotency_key: String,
+    },
 }
 
 enum LocalRequest {
@@ -705,6 +734,18 @@ fn into_request(command: Command) -> Result<Request, CliFailure> {
                 "idempotency_key": args.idempotency_key,
             }),
         ),
+        Command::Prepare(args) => {
+            let spec = read_bounded_json(&args.spec, 1024 * 1024)?;
+            validate_project_spec(&spec)?;
+            Ok(Request::Prepare {
+                project_root: args.project_root,
+                spec_parent: args.spec.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                spec,
+                owner: args.owner,
+                lease_id: args.lease_id,
+                idempotency_key: args.idempotency_key,
+            })
+        }
         Command::Lease { command } => match command {
             LeaseCommand::Claim(args) => call(
                 "lease_claim",
@@ -1366,8 +1407,171 @@ async fn execute_request(
             )
             .await
         }
+        Request::Prepare {
+            project_root,
+            spec_parent,
+            spec,
+            owner,
+            lease_id,
+            idempotency_key,
+        } => {
+            prepare_project(
+                client,
+                project_root,
+                spec_parent,
+                spec,
+                owner,
+                lease_id,
+                idempotency_key,
+            )
+            .await
+        }
         Request::Local(_) => unreachable!("local requests return before MCP startup"),
     }
+}
+
+async fn prepare_project(
+    client: &RunningService<RoleClient, ()>,
+    project_root: PathBuf,
+    spec_parent: PathBuf,
+    mut spec: Value,
+    owner: String,
+    lease_id: String,
+    idempotency_key: String,
+) -> Result<Output, CliFailure> {
+    let project = direct_local_directory(project_root.clone(), "project root")?;
+    let workspace = project
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| CliFailure::invalid("project root has no workspace ancestor"))?;
+    let workspace = direct_local_directory(workspace, "project workspace")?;
+    let assets = spec
+        .get_mut("assets")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| CliFailure::invalid("project spec assets are required"))?;
+
+    for (index, asset) in assets.iter_mut().enumerate() {
+        let asset_object = asset
+            .as_object_mut()
+            .ok_or_else(|| CliFailure::invalid("project spec asset must be an object"))?;
+        let stage_id = if let Some(existing) = asset_object.get("stage_id").and_then(Value::as_str)
+        {
+            existing.to_owned()
+        } else {
+            let (inbox_path, private_copy, expected_sha256) = if let Some(inbox) =
+                asset_object.get("inbox_path").and_then(Value::as_str)
+            {
+                (inbox.to_owned(), false, None)
+            } else {
+                let file = asset_object
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CliFailure::invalid("asset source is missing"))?;
+                let (path, digest) =
+                    copy_prepare_asset(&workspace, &spec_parent, file, &idempotency_key, index)?;
+                (path, true, Some(digest))
+            };
+            let role = stage_role(
+                asset_object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )?;
+            let staged_result = call_tool(
+                client,
+                "artifact_stage".to_owned(),
+                object(json!({
+                    "schema_version": SCHEMA_VERSION,
+                    "project_root": path(&project),
+                    "owner": owner,
+                    "lease_id": lease_id,
+                    "role": role,
+                    "inbox_path": inbox_path,
+                    "idempotency_key": sub_idempotency(&idempotency_key, "stage", index),
+                }))?,
+            )
+            .await;
+            if private_copy {
+                let temporary = workspace.join("inbox").join(&inbox_path);
+                let _ = fs::remove_file(&temporary);
+                let _ = temporary.parent().map(fs::remove_dir);
+            }
+            let staged = staged_result?;
+            if staged.exit_code != 0 {
+                return Ok(staged);
+            }
+            if expected_sha256.is_some_and(|expected| {
+                staged.value.pointer("/data/sha256").and_then(Value::as_str)
+                    != Some(expected.as_str())
+            }) {
+                return Err(CliFailure::invalid(
+                    "asset bytes changed for an existing idempotency key; use a new key",
+                ));
+            }
+            staged
+                .value
+                .pointer("/data/stage_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CliFailure::protocol("artifact stage returned no stage id"))?
+                .to_owned()
+        };
+        let id = asset_object
+            .get("id")
+            .cloned()
+            .ok_or_else(|| CliFailure::invalid("asset id is required"))?;
+        let kind = asset_object
+            .get("kind")
+            .cloned()
+            .ok_or_else(|| CliFailure::invalid("asset kind is required"))?;
+        asset_object.clear();
+        asset_object.insert("id".into(), id);
+        asset_object.insert("kind".into(), kind);
+        asset_object.insert("stage_id".into(), Value::String(stage_id));
+    }
+    let normalized = serde_json::to_string(&spec)
+        .map_err(|error| CliFailure::protocol(format!("could not encode project spec: {error}")))?;
+    let staged = call_tool(
+        client,
+        "artifact_stage".to_owned(),
+        object(json!({
+            "schema_version": SCHEMA_VERSION, "project_root": path(&project), "owner": owner,
+            "lease_id": lease_id, "role": "metadata", "inline_text": normalized,
+            "idempotency_key": sub_idempotency(&idempotency_key, "spec-stage", 0),
+        }))?,
+    )
+    .await?;
+    if staged.exit_code != 0 {
+        return Ok(staged);
+    }
+    let stage_id = staged
+        .value
+        .pointer("/data/stage_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliFailure::protocol("spec stage returned no stage id"))?;
+    let produced = call_tool(
+        client,
+        "produce_staged_artifact".to_owned(),
+        object(json!({
+            "schema_version": SCHEMA_VERSION, "project_root": path(&project), "owner": owner,
+            "lease_id": lease_id, "stage_id": stage_id, "artifact": "project-spec.json",
+            "produced_by": "video-studio prepare",
+            "idempotency_key": sub_idempotency(&idempotency_key, "spec-produce", 0),
+        }))?,
+    )
+    .await?;
+    if produced.exit_code != 0 {
+        return Ok(produced);
+    }
+    call_tool(
+        client,
+        "run_next".to_owned(),
+        object(json!({
+            "schema_version": SCHEMA_VERSION, "project_root": path(&project), "owner": owner,
+            "lease_id": lease_id, "runner": "prepare-project", "idempotency_key": idempotency_key,
+        }))?,
+    )
+    .await
 }
 
 async fn call_tool(
@@ -1391,6 +1595,250 @@ async fn call_tool(
         }),
     };
     Ok(Output { value, exit_code })
+}
+
+fn sub_idempotency(parent: &str, operation: &str, index: usize) -> String {
+    let mut digest = Sha256::new();
+    digest.update(parent.as_bytes());
+    digest.update(b"\0");
+    digest.update(operation.as_bytes());
+    digest.update(b"\0");
+    digest.update(index.to_string().as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn stage_role(kind: &str) -> Result<&'static str, CliFailure> {
+    match kind {
+        "audio" => Ok("reference_audio"),
+        "subtitle" => Ok("subtitle"),
+        "image" => Ok("reference_image"),
+        "video" => Ok("source_video"),
+        _ => Err(CliFailure::invalid(
+            "asset kind must be audio, subtitle, image, or video",
+        )),
+    }
+}
+
+fn copy_prepare_asset(
+    workspace: &Path,
+    spec_parent: &Path,
+    file: &str,
+    idempotency_key: &str,
+    index: usize,
+) -> Result<(String, String), CliFailure> {
+    let supplied = Path::new(file);
+    let source = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        spec_parent.join(supplied)
+    };
+    if !supplied.is_absolute() {
+        let relative = source
+            .strip_prefix(spec_parent)
+            .map_err(|_| CliFailure::invalid("asset file is unavailable"))?;
+        let mut ancestor = spec_parent.to_path_buf();
+        for component in relative.components() {
+            ancestor.push(component);
+            if fs::symlink_metadata(&ancestor)
+                .map_err(|_| CliFailure::invalid("asset file is unavailable"))?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(CliFailure::invalid(
+                    "asset file path must not traverse symlinks",
+                ));
+            }
+        }
+    }
+    let metadata = fs::symlink_metadata(&source)
+        .map_err(|_| CliFailure::invalid("asset file is unavailable"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 1024 * 1024 * 1024
+    {
+        return Err(CliFailure::invalid(
+            "asset file must be a direct non-empty file of at most 1 GiB",
+        ));
+    }
+    let nonce = &sub_idempotency(idempotency_key, "private-copy", index)[..16];
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CliFailure::invalid("asset file name is invalid"))?;
+    let relative = format!("prepare-{nonce}/{index}-{name}");
+    let inbox = workspace.join("inbox");
+    if inbox.is_symlink() || !inbox.is_dir() {
+        return Err(CliFailure::invalid("workspace inbox is unavailable"));
+    }
+    let private_dir = inbox.join(format!("prepare-{nonce}"));
+    match fs::create_dir(&private_dir) {
+        Ok(()) => {
+            #[cfg(unix)]
+            fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    CliFailure::unavailable(format!(
+                        "could not secure private intake directory: {error}"
+                    ))
+                },
+            )?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(CliFailure::unavailable(format!(
+                "could not create private intake directory: {error}"
+            )));
+        }
+    }
+    if private_dir.is_symlink() || !private_dir.is_dir() {
+        return Err(CliFailure::invalid("private intake directory is unsafe"));
+    }
+    let target = private_dir.join(format!("{index}-{name}"));
+    let mut input =
+        fs::File::open(&source).map_err(|_| CliFailure::invalid("asset file is unavailable"))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut output = options.open(&target).map_err(|error| {
+        CliFailure::unavailable(format!("could not create private asset copy: {error}"))
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut copied = 0u64;
+    let copy_result: Result<(), CliFailure> = loop {
+        let bytes = input
+            .read(&mut buffer)
+            .map_err(|error| CliFailure::unavailable(format!("could not read asset: {error}")))?;
+        if bytes == 0 {
+            break Ok(());
+        }
+        copied = copied.saturating_add(bytes as u64);
+        if copied > 1024 * 1024 * 1024 {
+            break Err(CliFailure::invalid(
+                "asset file exceeded 1 GiB while copying",
+            ));
+        }
+        digest.update(&buffer[..bytes]);
+        if let Err(error) = output.write_all(&buffer[..bytes]) {
+            break Err(CliFailure::unavailable(format!(
+                "could not copy asset into intake: {error}"
+            )));
+        }
+    };
+    drop(output);
+    if let Err(error) = copy_result {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    let current = input
+        .metadata()
+        .map_err(|_| CliFailure::invalid("asset file changed while copying"))?;
+    if current.len() != metadata.len() || current.modified().ok() != metadata.modified().ok() {
+        let _ = fs::remove_file(&target);
+        return Err(CliFailure::invalid("asset file changed while copying"));
+    }
+    let digest = format!("{:x}", digest.finalize());
+    Ok((relative, digest))
+}
+
+fn validate_project_spec(spec: &Value) -> Result<(), CliFailure> {
+    let root = spec
+        .as_object()
+        .ok_or_else(|| CliFailure::invalid("project spec must be a JSON object"))?;
+    if root.get("schema").and_then(Value::as_str) != Some("video_studio.project_spec.v1")
+        || root
+            .get("format")
+            .is_some_and(|value| !matches!(value.as_str(), Some("landscape" | "portrait")))
+    {
+        return Err(CliFailure::invalid(
+            "project spec schema or format is invalid",
+        ));
+    }
+    if !root
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(CliFailure::invalid("project spec title is required"));
+    }
+    let narration = root
+        .get("narration")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliFailure::invalid("project spec narration is required"))?;
+    if narration.get("mode").and_then(Value::as_str) != Some("import")
+        || !narration
+            .get("audio")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+        || !narration
+            .get("captions")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+    {
+        return Err(CliFailure::invalid(
+            "only imported narration with audio and captions IDs is supported",
+        ));
+    }
+    let assets = root
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliFailure::invalid("project spec assets are required"))?;
+    if assets.len() > 32 {
+        return Err(CliFailure::invalid("project spec has more than 32 assets"));
+    }
+    for asset in assets {
+        let asset = asset
+            .as_object()
+            .ok_or_else(|| CliFailure::invalid("asset must be an object"))?;
+        if !asset
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+        {
+            return Err(CliFailure::invalid("asset id is required"));
+        }
+        stage_role(
+            asset
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )?;
+        let count = ["file", "inbox_path", "stage_id"]
+            .iter()
+            .filter(|key| {
+                asset
+                    .get(**key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .count();
+        if count != 1 {
+            return Err(CliFailure::invalid(
+                "each asset needs exactly one of file, inbox_path, or stage_id",
+            ));
+        }
+    }
+    if root
+        .get("scenes")
+        .is_some_and(|value| !value.as_array().is_some_and(|scenes| !scenes.is_empty()))
+    {
+        return Err(CliFailure::invalid("project spec scenes are required"));
+    }
+    Ok(())
+}
+
+fn read_bounded_json(input: &Path, limit: usize) -> Result<Value, CliFailure> {
+    let mut bytes = fs::read(input)
+        .map_err(|error| CliFailure::invalid(format!("could not read spec: {error}")))?;
+    if bytes.len() > limit {
+        return Err(CliFailure::invalid("project spec exceeds 1 MiB"));
+    }
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| CliFailure::invalid(format!("project spec is not valid JSON: {error}")))?;
+    bytes.clear();
+    Ok(value)
 }
 
 fn read_input(input: &Path) -> Result<Value, CliFailure> {

@@ -66,38 +66,28 @@ launcher at `~/.local/bin/video-studio-mcp` is not replaced.
 
 ## First project
 
-Use a workspace outside the source checkout:
+The primary path is **your own narration audio and matching SRT subtitles**.
+No TTS account or API key is required. Follow the [user media walkthrough](docs/user-media.md)
+to create a project, prepare its scene/data spec with `video-studio prepare`,
+and render through the CLI. Images, video clips, diagrams, and background music
+are selected in JSON; no template source edits are needed.
 
-```sh
-video-studio workspace init --workspace "$HOME/VideoStudio"
-video-studio create --projects-root "$HOME/VideoStudio/projects" \
-  --project demo --idempotency-key create-demo
-scripts/prepare-example "$HOME/VideoStudio/projects/demo" --speech
-(cd "$HOME/VideoStudio/projects/demo/remotion" && npm ci --ignore-scripts)
-video-studio status --project-root "$HOME/VideoStudio/projects/demo"
-```
+Speech generation is optional and requires an [explicit provider choice](docs/narration-providers.md).
+The included ElevenLabs adapter is one choice, not a default. A provider can be
+supplied by an installed adapter package; Video Studio provides no hosted TTS.
 
-`prepare-example` writes original example inputs, captions, and local speech.
-It does not render a final or manufacture pronunciation/review approval.
-Without `--speech`, it creates a clearly labelled synchronization tone instead.
-The [template](templates/narrated/remotion/README.md) supports landscape,
-portrait, and cover compositions.
+For a dependency-only smoke test, `scripts/prepare-example PROJECT --speech`
+explicitly generates mechanical eSpeak NG demo speech. Without `--speech`, it
+creates a labelled synchronization tone. Both are test material. See the
+[template guide](templates/narrated/remotion/README.md) for the example workflow.
 
-Claim a lease, then use its returned `lease_id` to submit the render:
+Accepted render work is not completed work. Use the returned job ID with
+`video-studio job status` (or `logs`, `cancel`, `resume`). If you fix inputs after
+a failed render, submit a new render request: it creates a new job for the new
+revision and preserves the earlier history and final.
 
-```sh
-video-studio lease claim --project-root "$HOME/VideoStudio/projects/demo" \
-  --owner local --ttl-seconds 300 --idempotency-key lease-demo
-video-studio run --project-root "$HOME/VideoStudio/projects/demo" \
-  --owner local --lease-id '<returned lease_id>' \
-  --runner render-project --tools-root "$PWD/media-tools" \
-  --idempotency-key render-demo
-```
-
-Accepted is not completed. Use the returned job ID with `video-studio job status`
-(or `logs`, `cancel`, `resume`). Every operation is also available through
-`video-studio call TOOL --input request.json`; `video-studio tools` lists the
-exact typed input schemas. Run `video-studio job --help` for required parameters.
+Every operation is available through `video-studio call TOOL --input request.json`;
+`video-studio tools` lists the exact typed schemas.
 
 ## Review and export
 

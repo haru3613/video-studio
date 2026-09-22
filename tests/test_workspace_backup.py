@@ -291,7 +291,12 @@ def test_restore_interrupts_active_job_without_erasing_history_or_resurrecting_w
     assert response["data"]["status"] == "interrupted"
     assert response["data"]["epoch"] == 5
     assert response["data"]["error_code"] == "workspace_restored"
-    assert response["data"]["can_resume"] is True
+    # Restore deliberately preserves the old input revision as audit evidence,
+    # while moving the project root.  It must never present that old snapshot
+    # as resumable against the restored project's current inputs.
+    assert response["data"]["can_resume"] is False
+    blocked, blocked_code = job_interface.resume(restored_project, "a" * 32)
+    assert (blocked_code, blocked["code"]) == (3, "job_resume_revision_changed")
 
     connection = sqlite3.connect(destination / database.relative_to(root))
     row = connection.execute(

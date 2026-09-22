@@ -203,6 +203,14 @@ ARTIFACTS = [
         kind="json",
     ),
     Artifact(
+        "project-spec.json",
+        "preparation",
+        "Normalized imported narration and staged-media plan used by the bounded project preparer.",
+        kind="json",
+        producer="scripts/prepare-project via MCP staged artifact promotion",
+        profiles=("project_preparation.v1",),
+    ),
+    Artifact(
         "script-proposal.md",
         "proposal",
         "The approved script. Written after the operator picks the topic.",
@@ -435,6 +443,9 @@ def _validate_source(source: Path, artifact: Artifact) -> bytes:
                 )
             validate_runtime_contract(value.get("runtime_contract"))
             validate_publish_target(value.get("publish_target"))
+        if artifact.path == "project-spec.json":
+            if value.get("schema") != "video_studio.project_spec.v1":
+                raise ValueError("project spec schema is invalid")
         if artifact.path == "claims.json":
             claims = value.get("claims")
             if (
@@ -645,7 +656,7 @@ def scaffold(project: Path, *, force: bool = False) -> list:
             and active_profile not in artifact.profiles
         ):
             continue
-        if artifact.path in GENERATED_NEVER_SCAFFOLD:
+        if artifact.path in GENERATED_NEVER_SCAFFOLD or artifact.path == "project-spec.json":
             continue
         target = project / artifact.path
         if (

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
 
+function assertLocalPath(path) {
+  assert.equal(typeof path, "string");
+  assert.ok(path && !path.startsWith("/") && !path.includes("..") && !path.includes("\\") && !/^[a-z][a-z0-9+.-]*:/i.test(path));
+}
+
 const file = resolve(process.argv[2] ?? "src/content.json");
 const content = JSON.parse(readFileSync(file, "utf8"));
 
@@ -15,7 +20,9 @@ assert.ok(Array.isArray(content.captions) && content.captions.length > 0);
 let captionCursor = 0;
 const cues = new Set();
 for (const caption of content.captions) {
-  assert.equal(caption.startMs, captionCursor, "captions must be contiguous");
+  assert.ok(Number.isFinite(caption.startMs) && Number.isFinite(caption.endMs));
+  assert.ok(caption.startMs >= captionCursor, "captions must not overlap");
+  assert.ok(caption.endMs <= content.durationMs);
   assert.ok(caption.endMs > caption.startMs);
   assert.equal(typeof caption.text, "string");
   assert.ok(caption.text.trim());
@@ -24,7 +31,7 @@ for (const caption of content.captions) {
   captionCursor = caption.endMs;
   cues.add(caption.text);
 }
-assert.equal(captionCursor, content.durationMs);
+
 
 const forbiddenTimers = new Set([
   "cadence_seconds",
@@ -50,6 +57,15 @@ for (const scene of content.scenes) {
     eventIds.add(event.eventId);
     for (const key of Object.keys(event)) {
       assert.ok(!forbiddenTimers.has(key), `semantic timer is forbidden: ${key}`);
+    }
+    if (event.visual) {
+      assert.ok(["signal", "cards", "steps", "image", "video"].includes(event.visual.kind));
+      if (["image", "video"].includes(event.visual.kind)) assertLocalPath(event.visual.path);
+      if (event.visual.labels) {
+        assert.equal(event.visual.labels.length, 3);
+        assert.ok(event.visual.labels.every((label) => typeof label === "string" && label.trim() && label.length <= 60));
+      }
+      if (event.visual.fit) assert.ok(["contain", "cover"].includes(event.visual.fit));
     }
     eventCursor = event.endMs;
   }

@@ -6,10 +6,14 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import importlib.util
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MIXER = ROOT / "tools/mix_final.py"
+MIXER_MODULE_SPEC = importlib.util.spec_from_file_location("mix_final", MIXER)
+MIXER_MODULE = importlib.util.module_from_spec(MIXER_MODULE_SPEC)
+MIXER_MODULE_SPEC.loader.exec_module(MIXER_MODULE)
 
 
 class MixFinalTest(unittest.TestCase):
@@ -183,15 +187,43 @@ class MixFinalTest(unittest.TestCase):
             check=True,
         )
 
+        source_measurement = MIXER_MODULE.loudnorm_measure("ffmpeg", self.source)
         result = self.invoke()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["normalization_type"], "dynamic")
         self.assertLessEqual(
-            receipt["target"]["loudness_range_lu"] - receipt["loudness_range_lu"],
+            source_measurement["input_lra"] - receipt["loudness_range_lu"],
             3,
         )
+
+    def test_peak_limited_dynamic_result_uses_small_safe_gain_correction(self):
+        correction = MIXER_MODULE.bounded_gain_correction({
+            "input_i": -15.10,
+            "input_tp": -2.66,
+        })
+
+        self.assertAlmostEqual(correction, 1.10)
+
+    def test_peak_limited_dynamic_result_fails_with_measured_headroom(self):
+        with self.assertRaisesRegex(RuntimeError, "safe_peak_headroom=0.75 dB"):
+            MIXER_MODULE.bounded_gain_correction({
+                "input_i": -16.0,
+                "input_tp": -2.0,
+            })
+
+    def test_synthetic_gain_correction_changes_only_the_derived_audio(self):
+        corrected = self.source.parent / "corrected.mp4"
+        source_digest = self.sha256(self.source)
+        before = MIXER_MODULE.loudnorm_measure("ffmpeg", self.source)
+
+        MIXER_MODULE.encode_gain_correction("ffmpeg", self.source, corrected, 1.1)
+
+        after = MIXER_MODULE.loudnorm_measure("ffmpeg", corrected)
+        self.assertEqual(self.sha256(self.source), source_digest)
+        self.assertTrue(corrected.is_file())
+        self.assertAlmostEqual(after["input_i"] - before["input_i"], 1.1, delta=0.2)
 
     @staticmethod
     def sha256(path):

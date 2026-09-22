@@ -646,6 +646,80 @@ fn a_second_caller_runs_exactly_one_configured_gate_with_a_valid_lease() {
 }
 
 #[test]
+fn prepare_runner_has_fixed_owner_bound_argv_and_requires_the_current_spec_receipt() {
+    let directory = tempdir().unwrap();
+    let repo = directory.path().join("repo");
+    let project = directory.path().join("workspace/projects/demo");
+    fs::create_dir_all(repo.join("scripts")).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::write(repo.join("scripts/prepare-project"), "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(
+        repo.join("scripts/prepare-project"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let spec = br#"{"schema":"video_studio.project_spec.v1","title":"Imported"}"#;
+    fs::write(project.join("project-spec.json"), spec).unwrap();
+    let digest = format!("{:x}", Sha256::digest(spec));
+    let lease = ProjectStore::new(&project)
+        .claim_at("prepare-agent", Duration::from_secs(60), SystemTime::now())
+        .unwrap();
+    let request = RunNextRequest {
+        project_root: project.canonicalize().unwrap(),
+        lease: lease_input(&lease),
+        runner: "prepare-project".to_owned(),
+        tools_root: None,
+    };
+    let absolute = project.canonicalize().unwrap();
+    let prepared = serde_json::json!({
+        "schema_version": 1, "outcome": "ok", "code": "project_prepared",
+        "project": absolute,
+        "data": {"schema":"video_studio.project_preparation.v1", "project":"demo",
+          "spec_sha256":digest, "duration_seconds":1.0, "narration_source":"import",
+          "asset_count":2, "template":"narrated", "requires_dependency_install":true}
+    });
+    let mut executor = FakeExecutor {
+        data: Some(prepared),
+        ..FakeExecutor::default()
+    };
+    let result = run_next(&request, &repo, &mut executor);
+    assert_eq!(
+        (result.outcome.as_str(), result.code.as_str()),
+        ("ok", "project_prepared")
+    );
+    assert_eq!(
+        executor.calls[0].0,
+        repo.canonicalize().unwrap().join("scripts/prepare-project")
+    );
+    assert_eq!(
+        executor.calls[0].1,
+        vec![absolute.into_os_string(), "prepare-agent".into()]
+    );
+
+    let mut invalid = request.clone();
+    invalid.tools_root = Some(directory.path().to_path_buf());
+    assert_eq!(
+        run_next(&invalid, &repo, &mut FakeExecutor::default()).code,
+        "invalid_input"
+    );
+
+    let mut blocked_executor = FakeExecutor {
+        exit_code: 3,
+        data: Some(serde_json::json!({
+            "schema_version":1, "outcome":"blocked", "code":"captions_invalid",
+            "project":project.canonicalize().unwrap(), "data":{"message":"captions need correction"}
+        })),
+        ..FakeExecutor::default()
+    };
+    let blocked = run_next(&request, &repo, &mut blocked_executor);
+    assert_eq!(
+        (blocked.outcome.as_str(), blocked.code.as_str()),
+        ("blocked", "captions_invalid")
+    );
+}
+
+#[test]
 fn pronunciation_runners_and_human_review_use_fixed_digest_bound_commands() {
     let directory = tempdir().unwrap();
     let repo = directory.path().join("repo");

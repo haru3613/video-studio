@@ -505,6 +505,34 @@ exit 9
             (self.project / f"output/final.mp4.superseded-{old_stamp}").is_file()
         )
 
+    def test_revised_inputs_after_failed_retake_start_a_new_job_and_keep_final(self):
+        """A failed snapshot stays diagnostic evidence; a revised take is new work."""
+        self.install_real_renderer()
+        self.bind_narration(b"approved take one")
+        first, _response = self.start()
+        first = self.wait_for(first["job_id"], {"succeeded"}, timeout=20)
+        final = self.project / "output/final.mp4"
+        original_digest = hashlib.sha256(final.read_bytes()).hexdigest()
+
+        self.bind_narration(b"take two fails")
+        self.renderer.write_text("#!/bin/sh\necho renderer failure >&2\nexit 9\n")
+        self.renderer.chmod(self.renderer.stat().st_mode | stat.S_IXUSR)
+        failed, _response = self.start()
+        failed = self.wait_for(failed["job_id"], {"failed"}, timeout=10)
+        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
+
+        self.bind_narration(b"take three also fails")
+        retried, response = self.start()
+        self.assertNotEqual(retried["job_id"], failed["job_id"])
+        self.assertEqual(response["code"], "render_started")
+        self.assertEqual(portable_jobs.get_job(self.project, failed["job_id"])["status"], "failed")
+        self.assertFalse(
+            portable_jobs.promote_candidate(self.project, failed["job_id"], failed["epoch"])
+        )
+        retried = self.wait_for(retried["job_id"], {"failed"}, timeout=10)
+        self.assertEqual(retried["status"], "failed")
+        self.assertEqual(hashlib.sha256(final.read_bytes()).hexdigest(), original_digest)
+
 
 if __name__ == "__main__":
     unittest.main()
