@@ -25,7 +25,7 @@
     "remotion": "4.0.525"
   },
   "devDependencies": {
-    "@types/node": "22.20.4",
+    "@types/node": "22.20.5",
     "@types/react": "18.3.28",
     "typescript": "5.9.3"
   }
